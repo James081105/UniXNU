@@ -53,7 +53,7 @@ Patches apply in name order from `patches/xnu/*.patch` and `kits/NativePrelink/p
 | `offline-owner-cache-carrier` | Selects the owner dyld cache carrier and validates its device and path |
 | `offline-owner-systemos-mount` | Mounts the SystemOS cryptex and composes the root with the owner cache |
 | `offline-owner-z-air-init` | Initializes the Z air path for the owner root |
-| `offline-legacy-start` | Starts the legacy display probe after `IOKitBSDInit` |
+| `offline-legacy-start` | Starts the legacy display probe after `IOSecureBSDRoot`, so its `IOCoreSurfaceRoot` wait no longer blocks the `mountroot` that publishes the service |
 | `offline-component-load-probes` | Loads APFS, IOGPU and mobile graphics components with checkpoints |
 | `offline-native-gpu-broker` | Publishes the offline GPU broker after DTrace initialization |
 | `sheng-platform-power` | Runs the board PMGR integration before the calendar initialization |

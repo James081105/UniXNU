@@ -1,19 +1,50 @@
+Start the legacy display probe after the root volume is secured.
+
+``native_legacy_display_late_probe()``'s first act, after the five
+non-blocking probes, is a five-second ``waitForMatchingService`` for the
+``IOCoreSurfaceRoot`` name -- and that name is published by
+``IOSurfaceRoot::start()``, which ``bsd_init()`` reaches only after
+``bsd_autoconf()`` has returned and ``vfs_mountroot()`` has run.  The call
+used to sit at the end of ``bsd_autoconf()``, so the wait blocked the very
+boot that would publish what it was waiting for.
+
+Measured on the QEMU target (21H461):
+
+  * the early probe retains the display object at guest t~17.2 s (stage 3),
+  * the late probe runs at t~27.8 s,
+  * its five-second wait closes at t~32.8 s with the service absent,
+  * ``IOSurfaceRoot::installMemoryRegions()`` lands at t~51.8 s.
+
+So raising the timeout cannot help: it deadlocks.  Moving the call past
+``IOSecureBSDRoot()`` puts it where the root volume is known to be up, and
+the wait then returns at once because the service is already published.
+
+The five non-blocking probes that ran before the wait -- keystore, HID,
+VirtIO input, shared window, QemuMetal -- move with it.  None of them is
+needed to mount the root volume, and all of them still run before launchd,
+so SpringBoard sees the same devices it saw before, marginally later.
+
 --- a/bsd/kern/bsd_init.c
 +++ b/bsd/kern/bsd_init.c
-@@ -1282,7 +1282,15 @@ bsd_autoconf(void)
- 		}
+@@ -1013,6 +1013,21 @@
  	}
  
--	return IOKitBSDInit();
-+	kern_return_t result = IOKitBSDInit();
+ 	IOSecureBSDRoot(rootdevice);
 +#if (DEVELOPMENT || DEBUG) && defined(XNU_NATIVE_LEGACY_DISPLAY) && XNU_NATIVE_LEGACY_DISPLAY
-+	/* The original IOSurface personality requires the genuine IOBSD resource.
-+	 * The default-off framebuffer instrument may start only after publication.
-+	 */
++	/* The original IOSurface personality requires the genuine IOBSD resource,
++	 * and the default-off framebuffer instrument may start only after that
++	 * resource is published -- which IOKitBSDInit() does.  Waiting here used
++	 * to block the boot: IOSurfaceRoot publishes "IOCoreSurfaceRoot" only
++	 * once the root volume is mounted, and bsd_init() reaches mountroot only
++	 * after bsd_autoconf() returns, so a five-second wait in bsd_autoconf()
++	 * waited on the very boot it was blocking.  Measured on the QEMU target:
++	 * the wait closed at t~32.8 s with the service absent and
++	 * IOSurfaceRoot::installMemoryRegions() landed at t~51.8 s.  So the call
++	 * moved here, past IOSecureBSDRoot(): the point where the root volume is
++	 * known to be up and the service is therefore already published. */
 +	extern void native_legacy_display_late_probe(void);
 +	native_legacy_display_late_probe();
 +#endif
-+	return result;
- }
  
+ 	mountlist.tqh_first->mnt_flag |= MNT_ROOTFS;
  
