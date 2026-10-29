@@ -68,8 +68,10 @@ index a5ff474..4704203 100644
 +}
 +/* The GPU addon of the boot payload (scripts/make-gpu-addon.py, handed over by the loader as /chosen/memory-map/GpuAddon): every file
 + * whose content or mode differs from the mounted Data volume is written there before the addon mounts, so the plugin no longer has to
-+ * be part of the Data seed and the seed's persistent store survives a plugin rebuild. Missing directories below /private/var/ngpu are
-+ * created. A malformed addon is refused as a whole; a file that cannot be written keeps its old content.
++ * be part of the Data seed and the seed's persistent store survives a plugin rebuild. Missing directories are created,
++ * /private/var/ngpu itself included (it is in neither the OS image's /private/var nor the seed, and the seed's content hash is its
++ * identity, so this project's mount point cannot come from there). A malformed addon is refused as a whole; a file that cannot be
++ * written keeps its old content.
 + * Counters for the boot log: files in the addon (-1 none), files written, files already equal, failures and the last error. */
 +extern int native_ram_block_gpu_addon(const uint8_t **, uint64_t *) __attribute__((weak_import));
 +#include <libkern/zlib.h>
@@ -177,14 +179,25 @@ index a5ff474..4704203 100644
 +	int close_error = vnode_close(vp, FWRITE, ctx);
 +	return error ? error : close_error;
 +}
-+/* Creates the missing parent directories of an addon path with the mkdir syscall. The scratch is one 4 KiB page; the mount arguments
-+ * end below 0xa00. */
++/* Creates the missing directories of an addon path with the mkdir syscall, /private/var/ngpu itself included. The scratch is one
++ * 4 KiB page; the mount arguments end below 0xa00.
++ *
++ * Why /private/var/ngpu itself: it is not an iOS directory, so it is in neither the OS image's /private/var nor the Data seed, and
++ * provision-data-seed.py deliberately does not add it -- make-gpu-addon.py's own docstring says "The kernel creates missing
++ * directories", and the seed's content hash is its identity (fact 124), so putting this project's mount point in the seed would
++ * change that hash for a reason that has nothing to do with the plugin. Starting the scan at sizeof("/private/var/ngpu/") - 1
++ * therefore created only the directories BELOW it, and every mkdir below a parent that does not exist fails with ENOENT. MEASURED
++ * 2026-10-30 on bundle8: all ten files failed, native_gpu_addon_files=10 and native_gpu_addon_failed=10 with
++ * native_gpu_addon_error=2, and the three bindfs mounts then failed their first vnode_lookup with the same ENOENT.
++ *
++ * sizeof("/private/var/ngpu") - 1 is the index of the slash that TERMINATES /private/var/ngpu, so the first iteration zeroes
++ * there and mkdirs /private/var/ngpu itself, and the rest of the scan is unchanged. */
 +static int
 +native_gpu_addon_parents(proc_t p, user_addr_t scratch, const char *path)
 +{
 +	char parent[192];
 +	strlcpy(parent, path, sizeof(parent));
-+	for (size_t i = sizeof("/private/var/ngpu/") - 1; parent[i]; ++i) {
++	for (size_t i = sizeof("/private/var/ngpu") - 1; parent[i]; ++i) {
 +		if (parent[i] != '/') {
 +			continue;
 +		}
