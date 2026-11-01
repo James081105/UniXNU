@@ -9,7 +9,7 @@
  
  #include <mach/exclaves.h>
  
-@@ -7013,8 +7013,315 @@
+@@ -7013,8 +7013,318 @@
   *		word width of the kernel. Once the self-exec completes, the
   *		initproc might be different.
   */
@@ -27,12 +27,36 @@
 +#endif
 +extern int native_verified_block_root_authorized(dev_t);
 +/* The console port, for the two records this function emits at the end.
-+ * weak_import rather than a plain extern because the console archive is
-+ * behind its own build switch (CONFIG_XNU_NATIVE_VIRTIO_CONSOLE) and this
-+ * patch has to link with or without it; the address resolves to null when
-+ * the archive is absent and the call site checks for that first.  The idiom
-+ * is zzy-native-gpu-addon-mount.patch:76's, for the same reason. */
-+extern int native_console_report(const void *, size_t) __attribute__((weak_import));
++ *
++ * A STRONG extern, deliberately, and the reason is measured rather than
++ * assumed.  This used to be __attribute__((weak_import)), on the reasoning
++ * that the console archive is behind its own build switch and the patch had
++ * to link with or without it -- the idiom zzy-native-gpu-addon-mount.patch:76
++ * uses.  It does not work here.
++ *
++ * MEASURED 2026-11-02, build 41330622788.  An ungated record at this
++ * function's very first statement did not arrive on a boot where the guest ran
++ * to t=1530 s -- twenty-four times past this function -- while five records
++ * from the same port on the same boot arrived complete.  The records are
++ * byte-level in the booting kernel (187 and 149 bytes at the offsets the
++ * source predicts), the mount succeeded, and the call site panics on any
++ * non-zero return with no panic in the ring, so `error` was 0.  The only
++ * remaining cause is that the weak reference resolved to null: a weak_import
++ * does not oblige the linker to keep the definition, so the symbol the call
++ * site tests for is simply absent.
++ *
++ * A strong reference makes the definition load-bearing.  If the archive is
++ * ever absent while this code is compiled, the link fails naming the symbol
++ * -- which is the loud failure and the correct one, against a record that
++ * silently never arrives.
++ *
++ * The switch pairing makes this safe: XNU_OWNER_CACHE_MOUNT is set only by
++ * qemu_root_defconfig:33, which also sets CONFIG_XNU_NATIVE_VIRTIO_CONSOLE=y
++ * at :47, and that is what puts libNativeVirtioConsole.a on the kernel link
++ * with -Wl,-force_load (build-xnu-4k-baseline.sh:666-670).  A config with the
++ * mount on and the console off does not exist in this tree, and if one is
++ * ever added it should fail here rather than drop the records. */
++extern int native_console_report(const void *, size_t);
 +volatile int native_owner_cache_stage = 0;
 +volatile int native_owner_cache_status = -1;
 +volatile int native_owner_cache_mount_status = -1;
@@ -57,27 +81,6 @@
 -load_init_program_at_path(proc_t p, user_addr_t scratch_addr, const char* path)
 +native_owner_cache_prepare(proc_t p, user_addr_t scratch, user_addr_t *envp)
 +{
-+/* DIAGNOSTIC, TEMPORARY.  An ungated record at the function's very first
-+ * statement.  It answers one binary question: does native_console_report
-+ * resolve to a real function in THIS translation unit?
-+ *
-+ * Why this exists: the gated records at the end of this function did not
-+ * arrive, and every premise was verified -- the mount succeeded (the ring
-+ * shows disk3s1 mount-complete at t=64.109 with the exact vol-uuid the
-+ * record carries), load_init_program ran, there was no panic, and the call
-+ * site panics on any non-zero return, so `error` was 0.  That leaves
-+ * `native_console_report` resolving to null, which is the one thing a
-+ * source-level check cannot see and the wire is the only instrument for.
-+ *
-+ * If THIS record arrives, the symbol is fine and the gate is what failed.
-+ * If it does not, the weak import is not binding in kern_exec.o and the
-+ * emitter needs a different way onto the port.  Remove after answering. */
-+if (native_console_report) {
-+	static char const diag_record[] =
-+	    "{\"event\":\"diag.cache_prepare_entered\",\"symbol\":true,"
-+	    "\"source\":\"XNU.native_owner_cache_prepare\"}\n";
-+	native_console_report(diag_record, sizeof(diag_record) - 1);
-+}
 +#ifndef XNU_OWNER_CACHE_VOLUME_UUID
 +#define XNU_OWNER_CACHE_VOLUME_UUID "8846FE78-2910-4297-AF97-D59BB6F8FC16"
 +#endif
@@ -326,7 +329,7 @@
  {
  	int retval[2];
  	int error;
-@@ -7086,7 +7350,7 @@
+@@ -7086,7 +7353,7 @@
  	 */
  	init_exec_args.fname = argv0;
  	init_exec_args.argp = scratch_addr;
@@ -335,7 +338,7 @@
  
  	/*
  	 * So that init task is set with uid,gid 0 token
-@@ -7148,6 +7412,15 @@
+@@ -7148,6 +7415,15 @@
  	mach_vm_size_t map_page_size = vm_map_page_size(map);
  
  	(void) mach_vm_allocate_kernel(map, &scratch_addr, map_page_size, VM_FLAGS_ANYWHERE, VM_KERN_MEMORY_NONE);
@@ -351,7 +354,7 @@
  #if CONFIG_MEMORYSTATUS
  	(void) memorystatus_init_at_boot_snapshot();
  #endif /* CONFIG_MEMORYSTATUS */
-@@ -7162,7 +7435,7 @@
+@@ -7162,7 +7438,7 @@
  
  		if (is_release_suffix) {
  			printf("load_init_program: attempting to load /sbin/launchd\n");
@@ -360,7 +363,7 @@
  			if (!error) {
  				return;
  			}
-@@ -7173,7 +7446,7 @@
+@@ -7173,7 +7449,7 @@
  			strlcat(launchd_path, launchd_suffix, sizeof(launchd_path));
  
  			printf("load_init_program: attempting to load %s\n", launchd_path);
@@ -369,7 +372,7 @@
  			if (!error) {
  				return;
  			} else if (error != ENOENT) {
-@@ -7186,7 +7459,7 @@
+@@ -7186,7 +7462,7 @@
  	error = ENOENT;
  	for (i = 0; i < sizeof(init_programs) / sizeof(init_programs[0]); i++) {
  		printf("load_init_program: attempting to load %s\n", init_programs[i]);
