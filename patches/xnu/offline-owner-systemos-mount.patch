@@ -9,7 +9,7 @@
  
  #include <mach/exclaves.h>
  
-@@ -7013,8 +7013,256 @@
+@@ -7013,8 +7013,294 @@
   *		word width of the kernel. Once the self-exec completes, the
   *		initproc might be different.
   */
@@ -26,6 +26,13 @@
 +volatile uint64_t native_owner_cache_dyld_flags = 0;
 +#endif
 +extern int native_verified_block_root_authorized(dev_t);
++/* The console port, for the two records this function emits at the end.
++ * weak_import rather than a plain extern because the console archive is
++ * behind its own build switch (CONFIG_XNU_NATIVE_VIRTIO_CONSOLE) and this
++ * patch has to link with or without it; the address resolves to null when
++ * the archive is absent and the call site checks for that first.  The idiom
++ * is zzy-native-gpu-addon-mount.patch:76's, for the same reason. */
++extern int native_console_report(const void *, size_t) __attribute__((weak_import));
 +volatile int native_owner_cache_stage = 0;
 +volatile int native_owner_cache_status = -1;
 +volatile int native_owner_cache_mount_status = -1;
@@ -58,10 +65,15 @@
 +#if !CONFIG_UNION_MOUNTS
 +#error The owner composition requires the original native union-mount implementation
 +#endif
-+	const char *mountpoint = "/";
++/* One definition, used both by the functional mount below and by the report
++ * record at the end of this function.  A macro rather than the two literals
++ * that were here before, because the report has to name the same path the
++ * mount actually used and a second copy is a second thing to get wrong. */
++#define XNU_OWNER_CACHE_MOUNTPOINT "/"
 +#else
-+	const char *mountpoint = "/private/preboot";
++#define XNU_OWNER_CACHE_MOUNTPOINT "/private/preboot"
 +#endif
++	const char *mountpoint = XNU_OWNER_CACHE_MOUNTPOINT;
 +#if !defined(XNU_OWNER_UNION_SYSTEMOS) || !XNU_OWNER_UNION_SYSTEMOS
 +	const char *environment = "DYLD_SHARED_CACHE_DIR=/private/preboot/System/Library/Caches/com.apple.dyld";
 +#endif
@@ -173,6 +185,32 @@
 +	native_owner_cache_authorized = cache_authorized;
 +	native_owner_cache_status = error;
 +	native_owner_cache_checkpoint(error, cache_authorized);
++	/* Report the relations this mount established, on the guest channel
++	 * the acceptance gate reads.  M7 wants "system.mount" (p.system_mount)
++	 * and "system.volume_identity" (p.system_volume_identity); the
++	 * M9b blocker system_volume_mounted is satisfied by the same
++	 * "system.mount" event, so these two records clear three
++	 * requirements between them.
++	 *
++	 * Only on success, and only here: the mount is complete and authorized
++	 * by this point, and an earlier emission would put "mounted"
++	 * on the wire for a mount that a later copyout failure then abandoned.
++	 *
++	 * Static strings only.  XNU_OWNER_CACHE_VOLUME_UUID and
++	 * XNU_OWNER_CACHE_MOUNTPOINT are string literals, so they concatenate
++	 * directly into the record; there is no snprintf call, and therefore no
++	 * way for a formatted number to disagree with the mount that happened.
++	 * If either macro is ever redefined as something other than a string
++	 * literal this fails to COMPILE, which is the loud failure and the
++	 * correct one -- a record that silently says something else is worse. */
++	if (!error && native_console_report) {
++		static char const mount_record[] =
++		    "{\"event\":\"system.mount\",\"mounted\":true," "\"volume_uuid\":\"" XNU_OWNER_CACHE_VOLUME_UUID "\"," "\"mountpoint\":\"" XNU_OWNER_CACHE_MOUNTPOINT "\"," "\"filesystem\":\"apfs\",\"readonly\":true," "\"source\":\"XNU.native_owner_cache_prepare\"}\n";
++		static char const identity_record[] =
++		    "{\"event\":\"system.volume_identity\"," "\"volume_uuid\":\"" XNU_OWNER_CACHE_VOLUME_UUID "\"," "\"filesystem\":\"apfs\"," "\"source\":\"XNU.native_owner_cache_prepare\"}\n";
++		native_console_report(mount_record, sizeof(mount_record) - 1);
++		native_console_report(identity_record, sizeof(identity_record) - 1);
++	}
 +	return error;
 +}
 +#endif
