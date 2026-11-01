@@ -341,8 +341,6 @@
 @@ -7148,6 +7415,36 @@
  	mach_vm_size_t map_page_size = vm_map_page_size(map);
  
- 	(void) mach_vm_allocate_kernel(map, &scratch_addr, map_page_size, VM_FLAGS_ANYWHERE, VM_KERN_MEMORY_NONE);
-+	user_addr_t init_envp = USER_ADDR_NULL;
 +/* DIAGNOSTIC, TEMPORARY.  A record at the top of load_init_program(), BEFORE
 + * the prepare calls below and before the init_programs[] loop whose
 + * "attempting to load" line the kernel ring prints at t=71.8.
@@ -364,6 +362,8 @@
 +	    "\"XNU.load_init_program\"}\n";
 +	native_console_report(diag_record, sizeof(diag_record) - 1);
 +}
+ 	(void) mach_vm_allocate_kernel(map, &scratch_addr, map_page_size, VM_FLAGS_ANYWHERE, VM_KERN_MEMORY_NONE);
++	user_addr_t init_envp = USER_ADDR_NULL;
 +#if defined(XNU_OWNER_CACHE_MOUNT) && XNU_OWNER_CACHE_MOUNT
 +	int cache_error = native_owner_cache_prepare(p, (user_addr_t)scratch_addr, &init_envp);
 +	if (cache_error) panic("offline owner SystemOS mount failed: %d", cache_error);
