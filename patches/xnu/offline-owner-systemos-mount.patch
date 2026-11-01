@@ -9,23 +9,10 @@
  
  #include <mach/exclaves.h>
  
-@@ -7013,8 +7013,318 @@
+@@ -7013,8 +7013,332 @@
   *		word width of the kernel. Once the self-exec completes, the
   *		initproc might be different.
   */
-+#if defined(XNU_OWNER_CACHE_MOUNT) && XNU_OWNER_CACHE_MOUNT
-+#if !DEVELOPMENT && !DEBUG
-+#error The offline owner cache mount is a development instrument
-+#endif
-+extern int native_verified_block_volume_device(const char *, dev_t *, char *, size_t);
-+#if defined(XNU_OWNER_BOOT_MANIFEST) && XNU_OWNER_BOOT_MANIFEST
-+extern int native_owner_publish_boot_manifest(dev_t, const char *, dev_t, const char *);
-+#endif
-+#if defined(XNU_OWNER_CACHE_STARTUP) && XNU_OWNER_CACHE_STARTUP
-+extern void commpage_update_dyld_flags(uint64_t);
-+volatile uint64_t native_owner_cache_dyld_flags = 0;
-+#endif
-+extern int native_verified_block_root_authorized(dev_t);
 +/* The console port, for the two records this function emits at the end.
 + *
 + * A STRONG extern, deliberately, and the reason is measured rather than
@@ -55,8 +42,35 @@
 + * at :47, and that is what puts libNativeVirtioConsole.a on the kernel link
 + * with -Wl,-force_load (build-xnu-4k-baseline.sh:666-670).  A config with the
 + * mount on and the console off does not exist in this tree, and if one is
++ *
++ * AND THE DECLARATION MUST BE UNCONDITIONAL.  Measured 2026-11-02, build
++ * 41359711528: the diagnostic below -- the one record whose whole purpose is
++ * to ask whether this port is reachable from kern_exec.c at all -- is emitted
++ * OUTSIDE the XNU_OWNER_CACHE_MOUNT block, and this declaration was inside it.
++ * The build log names the configuration: "kernel: no owner root chain on disk,
++ * so building qemu_defconfig" -- the first pass, which does not set the macro
++ * for this translation unit.  The call compiled and the declaration did not,
++ * and the kernel failed to build on the very record meant to diagnose it.
++ *
++ * That is the inverse of the dyld emitter's defect, where the macro gated the
++ * EMITTER and it was silently not compiled -- a no-op rather than a failure.
++ * Same root cause both times: a caller and its declaration behind different
++ * conditionals.  So the declaration lives above the guard, unconditionally.
 + * ever added it should fail here rather than drop the records. */
 +extern int native_console_report(const void *, size_t);
++#if defined(XNU_OWNER_CACHE_MOUNT) && XNU_OWNER_CACHE_MOUNT
++#if !DEVELOPMENT && !DEBUG
++#error The offline owner cache mount is a development instrument
++#endif
++extern int native_verified_block_volume_device(const char *, dev_t *, char *, size_t);
++#if defined(XNU_OWNER_BOOT_MANIFEST) && XNU_OWNER_BOOT_MANIFEST
++extern int native_owner_publish_boot_manifest(dev_t, const char *, dev_t, const char *);
++#endif
++#if defined(XNU_OWNER_CACHE_STARTUP) && XNU_OWNER_CACHE_STARTUP
++extern void commpage_update_dyld_flags(uint64_t);
++volatile uint64_t native_owner_cache_dyld_flags = 0;
++#endif
++extern int native_verified_block_root_authorized(dev_t);
 +volatile int native_owner_cache_stage = 0;
 +volatile int native_owner_cache_status = -1;
 +volatile int native_owner_cache_mount_status = -1;
