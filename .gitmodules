@@ -42,7 +42,7 @@
 	url = https://github.com/UniXNU/NativeVirtioBlock.git
 [submodule "drivers/NativeVirtioConsole"]
 	path = drivers/NativeVirtioConsole
-	url = https://github.com/UniXNU/NativeVirtioConsole.git
+	url = https://github.com/James081105/VirtioMmioConsole.git
 [submodule "kits/AdrenoFirmware"]
 	path = kits/AdrenoFirmware
 	url = https://github.com/UniXNU/AdrenoFirmware.git
