@@ -1,7 +1,7 @@
 diff --git a/bsd/kern/bsd_init.c b/bsd/kern/bsd_init.c
 --- a/bsd/kern/bsd_init.c
 +++ b/bsd/kern/bsd_init.c
-@@ -1096,9 +1096,399 @@
+@@ -1096,9 +1096,422 @@
  
  	bsd_init_kprintf("bsd_do_post - done");
  
@@ -348,6 +348,24 @@ diff --git a/bsd/kern/bsd_init.c b/bsd/kern/bsd_init.c
 +void
 +native_install_service_thread(void *param __unused, wait_result_t wr __unused)
 +{
++	/* DIAGNOSTIC, and the reason it is here rather than inferred.  A host put
++	 * FIFTY well-formed install frames on the channel (MEASURED, 50 successful
++	 * sendall calls, zero errors, on a 1500-second window) and
++	 * install.registered did not arrive -- with diag.free_fn_status reporting
++	 * "success", so the TX entry point works.  That leaves three causes with
++	 * different remedies and no way to tell them apart from the outside:
++	 * the thread never started, native_console_poll() never returns data, or
++	 * the recogniser rejects the frame.  One record at the top of this
++	 * function and one on the first non-empty poll split the first two. */
++	static char const thread_started_record[] =
++	    "{\"event\":\"diag.install_thread_started\","
++	    "\"source\":\"XNU.bsdinit_task\"}\n";
++	static char const rx_bytes_record[] =
++	    "{\"event\":\"diag.install_rx_bytes\","
++	    "\"source\":\"XNU.native_console_poll\"}\n";
++	static int rx_reported = 0;
++	native_console_report(thread_started_record,
++	    sizeof(thread_started_record) - 1);
 +	static char line[NATIVE_INSTALL_LINE_MAX];
 +	size_t filled = 0;
 +
@@ -370,6 +388,11 @@ diff --git a/bsd/kern/bsd_init.c b/bsd/kern/bsd_init.c
 +			continue;
 +		}
 +		filled += got;
++		if (!rx_reported) {
++			rx_reported = 1;
++			native_console_report(rx_bytes_record,
++			    sizeof(rx_bytes_record) - 1);
++		}
 +
 +		/* Every complete line the buffer now holds, in arrival order. */
 +		scan = 0;

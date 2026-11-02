@@ -1,0 +1,97 @@
+--- a/bsd/vm/vm_unix.c
++++ b/bsd/vm/vm_unix.c
+@@ -2697,9 +2697,48 @@
+ 	return error;
+ }
+ 
++#if defined(XNU_NATIVE_VIRTIO_CONSOLE) && XNU_NATIVE_VIRTIO_CONSOLE
++/* The console port, for the one record _shared_region_map_and_slide() emits at
++ * its end.  A STRONG extern, deliberately, and the reason is measured rather
++ * than assumed: offline-owner-systemos-mount.patch carries the same
++ * declaration, and its earlier __attribute__((weak_import)) form resolved to
++ * null on a real guest, dropping both of that patch's records with a green
++ * build and the records byte-level in the booting kernel (build 41330622788).
++ * A weak reference does not oblige the linker to keep the definition, so the
++ * symbol the call site tests for is simply absent, and the null check then
++ * makes that absence look like a deliberate design decision.
++ *
++ * The pairing that makes a strong reference safe here is the one the mount
++ * patch does NOT use.  XNU_NATIVE_VIRTIO_CONSOLE is the switch that puts
++ * libNativeVirtioConsole.a on the kernel link at all:
++ * build-xnu-4k-baseline.sh:197-198 adds -DXNU_NATIVE_VIRTIO_CONSOLE=1 and
++ * :666-670 adds -Wl,-force_load,<archive>.  It is set by qemu_root_defconfig
++ * only, and vm_unix.o receives the macro from build-xnu-4k-baseline.sh:484's
++ * own vm_unix.o_CFLAGS_ADD line, which this patch's companion edit adds.  A
++ * build with this emitter compiled and the archive absent therefore cannot
++ * exist: macro off means not compiled, macro on means force-loaded.  There is
++ * no null check on the symbol for that reason: liveness is answered by the
++ * call's return status, never by a test on whether it resolved. */
++extern int native_console_report(const void *, size_t);
++#endif
++/* One dyld.cache_read record per boot, and the reason is a measured property
++ * of the channel rather than a preference.  The site is per-process: dyld
++ * calls shared_region_map_np() in every process that maps the shared cache,
++ * so an unbounded emitter here fires once per such process.  The transport
++ * it writes to is synchronous -- NativeVirtioConsole::send() ends in
++ * complete(1,&consumed) (NativeVirtioConsole.cpp:250), which waits on a 2000
++ * ms deadline (:226) and leaves the descriptor device-owned when that
++ * deadline expires (:247) -- so one record costs at most one deadline and one
++ * record per process costs one per process that ever mapped the cache.
++ *
++ * Set BEFORE the emit and never cleared: a record that is in flight is a
++ * record that has been reported, and a re-entrant path must not put a second
++ * one behind it.  Declared at unconditional file scope, which is where the
++ * emit site below sits too. */
++static int native_dyld_cache_read_reported = 0;
+ /*
+  * shared_region_map_np()
+  *
+  * This system call is intended for dyld.
+  *
+  * dyld uses this to map a shared cache file into a shared region.
+@@ -2789,6 +2828,45 @@
+ 		("shared_region: %p [%d(%s)] <- map\n",
+ 		(void *)VM_KERNEL_ADDRPERM(current_thread()),
+ 		proc_getpid(p), p->p_comm));
++	/* Report the dyld shared cache read on the guest channel the acceptance
++	 * gate reads.  milestones.py:1510's p.dyld_cache_read wants a guest event
++	 * named "dyld.cache_read", and this is the site where the kernel has just
++	 * established it: vm_shared_region_map_file() above mapped the shared
++	 * cache file(s) into this process's shared region, `error` is 0, and the
++	 * block a few lines up has just marked the process as using split
++	 * libraries -- which is what the dyld shared cache IS.  dyld calls this
++	 * path (shared_region_map_np -> _shared_region_map_and_slide) in every
++	 * process that uses the shared cache, so the site is per-process rather
++	 * than once per boot -- and that is exactly why the emit below is
++	 * bounded.  The flag it tests is set before the call and never cleared,
++	 * so the first successful read reports and every later one is silent:
++	 * the gate keeps only the first record for an event name anyway, and the
++	 * channel would charge each extra one a full 2000 ms deadline.
++	 *
++	 * Only on success, and only here: the cleanup above has already released
++	 * the file mappings and the shared-region reference, and an earlier
++	 * emission would put "read" on the wire for a mapping a later failure
++	 * then abandoned.
++	 *
++	 * Static strings only, and no snprintf, for the reason the mount emitter
++	 * gives: there is no formatted value here that could disagree with what
++	 * happened.  The record names the function and nothing else.  No path,
++	 * because this function reaches the shared cache only through
++	 * sr_file_mappings and never holds a path.  No pid, because a formatted
++	 * pid would put a formatting path in front of a record whose only job is
++	 * to arrive whole, and a record that is present but wrong is worse than
++	 * one that is merely terse.  What the site proves is the event; the ring's
++	 * own per-process lines are the cross-check for which process it was. */
++	if (!error && !native_dyld_cache_read_reported) {
++		static char const cache_read_record[] =
++		    "{\"event\":\"dyld.cache_read\","
++		    "\"source\":\"XNU._shared_region_map_and_slide\"}\n";
++		/* Claimed before the call, not after: the record is on its way out,
++		 * and a path that re-enters this function while send() waits must
++		 * not queue a second one behind it. */
++		native_dyld_cache_read_reported = 1;
++		native_console_report(cache_read_record, sizeof(cache_read_record) - 1);
++	}
+ 
+ 	return error;
+ }
