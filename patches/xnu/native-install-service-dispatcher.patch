@@ -1,19 +1,11 @@
 diff --git a/bsd/kern/bsd_init.c b/bsd/kern/bsd_init.c
 --- a/bsd/kern/bsd_init.c
 +++ b/bsd/kern/bsd_init.c
-@@ -1096,9 +1096,406 @@
+@@ -1096,9 +1096,407 @@
  
  	bsd_init_kprintf("bsd_do_post - done");
  
 +#if defined(XNU_OWNER_ROOT_TRUST) && XNU_OWNER_ROOT_TRUST && !(defined(XNU_NATIVE_OFFLINE_GPU) && XNU_NATIVE_OFFLINE_GPU)
-+	/* The reader's forward declaration.  The definitions live AFTER
-+	 * bsdinit_task(), so without this line the call below is a call to an
-+	 * undeclared function -- the same class of defect as build 41359711528,
-+	 * which failed at kern_exec.c:8120 for exactly that reason, and just as
-+	 * invisible to every source-level check because nothing on this host
-+	 * preprocesses.  `static` here and `static` at the definition is the
-+	 * correct pairing for an internal-linkage function. */
-+	static void native_install_service_thread(void *, wait_result_t);
 +	/* Start the guest's install service, then raise launchd.  A kernel
 +	 * thread rather than work on this one, for the reason
 +	 * native_install_service_thread() gives at length: the reader waits,
@@ -79,8 +71,17 @@ diff --git a/bsd/kern/bsd_init.c b/bsd/kern/bsd_init.c
 + * No __attribute__((weak_import)) and no `if (native_console_poll)` anywhere:
 + * see the note inside the guard. */
 +extern int native_console_poll(void *, size_t *);
++extern int native_console_report(const void *, size_t);
 +
 +#if defined(XNU_OWNER_ROOT_TRUST) && XNU_OWNER_ROOT_TRUST && !(defined(XNU_NATIVE_OFFLINE_GPU) && XNU_NATIVE_OFFLINE_GPU)
++/* The reader's forward declaration, at FILE scope.  It was inside
++ * bsd_do_post()'s body, where `static` is illegal -- build 41376479360's
++ * second pass failed with "function declared in block scope cannot have
++ * 'static' storage class", and removing the keyword alone then failed with
++ * "static declaration follows non-static declaration" against the
++ * definition below.  Both spell `static` and both sit inside this guard, so
++ * they agree. */
++static void native_install_service_thread(void *, wait_result_t);
 +/*
 + * The guest's install service, and the one record it emits.
 + *
