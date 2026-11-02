@@ -1,10 +1,9 @@
 --- a/bsd/vm/vm_unix.c
 +++ b/bsd/vm/vm_unix.c
-@@ -2697,9 +2697,48 @@
+@@ -2697,9 +2697,58 @@
  	return error;
  }
  
-+#if defined(XNU_NATIVE_VIRTIO_CONSOLE) && XNU_NATIVE_VIRTIO_CONSOLE
 +/* The console port, for the one record _shared_region_map_and_slide() emits at
 + * its end.  A STRONG extern, deliberately, and the reason is measured rather
 + * than assumed: offline-owner-systemos-mount.patch carries the same
@@ -25,9 +24,20 @@
 + * build with this emitter compiled and the archive absent therefore cannot
 + * exist: macro off means not compiled, macro on means force-loaded.  There is
 + * no null check on the symbol for that reason: liveness is answered by the
-+ * call's return status, never by a test on whether it resolved. */
++ * call's return status, never by a test on whether it resolved.
++ *
++ * AT UNCONDITIONAL FILE SCOPE, NOT INSIDE THE GUARD, and that is the third
++ * time this exact placement has cost a build.  The first revision of this
++ * patch wrapped the extern in the #if below and put the emitter's call in the
++ * second hunk, OUTSIDE it.  Build 41441479230 failed at
++ * `vm_unix.c:2941:3: error: call to undeclared function
++ * 'native_console_report'` -- the caller outside the guard that pairs with the
++ * declaration, which is the same defect build 41359711528 found in
++ * kern_exec.c:8120 and which native-install-service-dispatcher.patch records
++ * at length in its own file-scope comment.  A declaration with no definition
++ * is free: the linker only resolves a symbol something REFERENCES, so an
++ * unconditional extern costs nothing when the emitter is compiled out. */
 +extern int native_console_report(const void *, size_t);
-+#endif
 +/* One dyld.cache_read record per boot, and the reason is a measured property
 + * of the channel rather than a preference.  The site is per-process: dyld
 + * calls shared_region_map_np() in every process that maps the shared cache,
@@ -49,10 +59,11 @@
   * This system call is intended for dyld.
   *
   * dyld uses this to map a shared cache file into a shared region.
-@@ -2789,6 +2828,45 @@
+@@ -2789,6 +2838,47 @@
  		("shared_region: %p [%d(%s)] <- map\n",
  		(void *)VM_KERNEL_ADDRPERM(current_thread()),
  		proc_getpid(p), p->p_comm));
++#if defined(XNU_NATIVE_VIRTIO_CONSOLE) && XNU_NATIVE_VIRTIO_CONSOLE
 +	/* Report the dyld shared cache read on the guest channel the acceptance
 +	 * gate reads.  milestones.py:1510's p.dyld_cache_read wants a guest event
 +	 * named "dyld.cache_read", and this is the site where the kernel has just
@@ -92,6 +103,7 @@
 +		native_dyld_cache_read_reported = 1;
 +		native_console_report(cache_read_record, sizeof(cache_read_record) - 1);
 +	}
- 
++#endif /* XNU_NATIVE_VIRTIO_CONSOLE */
+
  	return error;
  }

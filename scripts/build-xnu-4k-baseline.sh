@@ -481,11 +481,17 @@ if { [ "$OWNER_CACHE_CARRIER" = 1 ] && [ "$OWNER_CACHE_STARTUP" != 1 ]; } ||
   echo 'Owner carrier policy requires authenticated owner startup; wrong UUID is an isolated negative control' >&2
   exit 1
 fi
-EXTRA_MAKE_ARGS+=("vm_unix.o_CFLAGS_ADD=-DXNU_OWNER_CACHE_CARRIER=$OWNER_CACHE_CARRIER -DXNU_OWNER_CACHE_CARRIER_WRONG_UUID=$OWNER_CACHE_CARRIER_WRONG_UUID")
+# The console macro rides along on the same line because make takes the LAST
+# vm_unix.o_CFLAGS_ADD, so a second EXTRA_MAKE_ARGS entry would silently discard
+# the carrier one.  It is needed at all because native-dyld-cache-read.patch
+# guards its emitter on it, and the stamp below is extended to carry it so a
+# change in the console switch forces vm_unix.o to be rebuilt rather than
+# reusing a stale object.
+EXTRA_MAKE_ARGS+=("vm_unix.o_CFLAGS_ADD=-DXNU_OWNER_CACHE_CARRIER=$OWNER_CACHE_CARRIER -DXNU_OWNER_CACHE_CARRIER_WRONG_UUID=$OWNER_CACHE_CARRIER_WRONG_UUID -DXNU_NATIVE_VIRTIO_CONSOLE=$NATIVE_VIRTIO_CONSOLE")
 OWNER_CARRIER_STAMP=$ROOT/build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/.owner-cache-carrier-mode
-if [ "$(cat "$OWNER_CARRIER_STAMP" 2>/dev/null || echo 0:0)" != "$OWNER_CACHE_CARRIER:$OWNER_CACHE_CARRIER_WRONG_UUID" ]; then
+if [ "$(cat "$OWNER_CARRIER_STAMP" 2>/dev/null || echo 0:0:0)" != "$OWNER_CACHE_CARRIER:$OWNER_CACHE_CARRIER_WRONG_UUID:$NATIVE_VIRTIO_CONSOLE" ]; then
   rm -f "$ROOT/build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/bsd/DEVELOPMENT/vm_unix.o"
-  printf '%s\n' "$OWNER_CACHE_CARRIER:$OWNER_CACHE_CARRIER_WRONG_UUID" > "$OWNER_CARRIER_STAMP"
+  printf '%s\n' "$OWNER_CACHE_CARRIER:$OWNER_CACHE_CARRIER_WRONG_UUID:$NATIVE_VIRTIO_CONSOLE" > "$OWNER_CARRIER_STAMP"
 fi
 DT_PANIC_REGION=${XNU_DT_PANIC_REGION:-0}
 if [ "$DT_PANIC_REGION" != 0 ] && [ "$DT_PANIC_REGION" != 1 ]; then

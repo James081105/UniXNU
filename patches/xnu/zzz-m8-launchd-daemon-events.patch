@@ -1,13 +1,12 @@
 diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
 --- a/bsd/kern/kern_exec.c
 +++ b/bsd/kern/kern_exec.c
-@@ -186,10 +186,141 @@
+@@ -186,10 +186,153 @@
  
  #include <CoreEntitlements/CoreEntitlements.h>
  
  #include <mach/exclaves.h>
  
-+#if defined(XNU_OWNER_CACHE_MOUNT) && XNU_OWNER_CACHE_MOUNT
 +/* M8 wants the original launchd and the daemons that followed it, both read off
 + * a guest channel (milestones.py:1512-1513 for the probes, :2424-2463 for the
 + * milestone).  The two emitters below are ONE change and must land together:
@@ -33,7 +32,19 @@ diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
 + * is therefore no `if (native_console_report)` test anywhere in this patch:
 + * liveness is answered by the call's return status, and a null check cannot
 + * tell "the port is not there yet" apart from "the symbol was never linked",
-+ * which have opposite remedies. */
++ * which have opposite remedies.
++ *
++ * AT UNCONDITIONAL FILE SCOPE, NOT INSIDE A GUARD, and the reason is measured.
++ * This patch has THREE hunks and each opens its own
++ * `#if defined(XNU_OWNER_CACHE_MOUNT)`.  With the extern inside the first, the
++ * `launchd.running` emitter in the third sits outside the region that declared
++ * it -- so it would fail to compile with "call to undeclared function", exactly
++ * as build 41441479230's vm_unix.c:2941 did.  It happens to compile today only
++ * because offline-owner-systemos-mount.patch carries its own file-scope
++ * declaration, which is a coupling nobody asked for and nothing asserts.  A
++ * declaration with no definition is FREE -- the linker only resolves a symbol
++ * something REFERENCES -- so an unconditional extern costs nothing when the
++ * emitters are compiled out. */
 +extern int native_console_report(const void *, size_t);
 +
 +/* The longest record this block can build, NUL included.  The worst case is 98
@@ -42,6 +53,7 @@ diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
 + * native_m8_report_daemon() can only truncate, never overrun. */
 +#define M8_RECORD_MAX 192
 +
++#if defined(XNU_OWNER_CACHE_MOUNT) && XNU_OWNER_CACHE_MOUNT
 +static char const m8_daemon_prefix[] = "{\"event\":\"daemon.spawned\",\"pid\":";
 +static char const m8_daemon_middle[] = ",\"comm\":\"";
 +static char const m8_daemon_suffix[] = "\",\"source\":\"XNU.__mac_execve\"}\n";
@@ -143,7 +155,7 @@ diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
  /* enable crash reports on various exec failures */
  static TUNABLE(bool, bootarg_execfailurereports, "execfailurecrashes", false);
  
-@@ -5284,16 +5415,39 @@
+@@ -5284,16 +5427,39 @@
  	kauth_cred_unref(&context.vc_ucred);
  
  	if (!error) {
@@ -183,7 +195,7 @@ diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
  		ipc_task_enable(new_task);
  		error = process_signature(p, imgp);
  	}
-@@ -8189,10 +8343,51 @@
+@@ -8189,10 +8355,51 @@
  	error = ENOENT;
  	for (i = 0; i < sizeof(init_programs) / sizeof(init_programs[0]); i++) {
  		printf("load_init_program: attempting to load %s\n", init_programs[i]);
