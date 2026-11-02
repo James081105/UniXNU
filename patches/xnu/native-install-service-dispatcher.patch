@@ -1,7 +1,7 @@
 diff --git a/bsd/kern/bsd_init.c b/bsd/kern/bsd_init.c
 --- a/bsd/kern/bsd_init.c
 +++ b/bsd/kern/bsd_init.c
-@@ -1096,9 +1096,407 @@
+@@ -1096,9 +1096,400 @@
  
  	bsd_init_kprintf("bsd_do_post - done");
  
@@ -29,6 +29,7 @@ diff --git a/bsd/kern/bsd_init.c b/bsd/kern/bsd_init.c
 +	{
 +		thread_t service = THREAD_NULL;
 +
++	void native_install_service_thread(void *, wait_result_t);
 +		if (kernel_thread_start(native_install_service_thread, NULL, &service) == KERN_SUCCESS) {
 +			thread_deallocate(service);
 +		}
@@ -74,14 +75,6 @@ diff --git a/bsd/kern/bsd_init.c b/bsd/kern/bsd_init.c
 +extern int native_console_report(const void *, size_t);
 +
 +#if defined(XNU_OWNER_ROOT_TRUST) && XNU_OWNER_ROOT_TRUST && !(defined(XNU_NATIVE_OFFLINE_GPU) && XNU_NATIVE_OFFLINE_GPU)
-+/* The reader's forward declaration, at FILE scope.  It was inside
-+ * bsd_do_post()'s body, where `static` is illegal -- build 41376479360's
-+ * second pass failed with "function declared in block scope cannot have
-+ * 'static' storage class", and removing the keyword alone then failed with
-+ * "static declaration follows non-static declaration" against the
-+ * definition below.  Both spell `static` and both sit inside this guard, so
-+ * they agree. */
-+static void native_install_service_thread(void *, wait_result_t);
 +/*
 + * The guest's install service, and the one record it emits.
 + *
@@ -353,7 +346,7 @@ diff --git a/bsd/kern/bsd_init.c b/bsd/kern/bsd_init.c
 + * every other non-zero status means the same thing to this loop -- the port has
 + * nothing for it right now -- so both are waited out rather than distinguished,
 + * and neither is a reason to stop. */
-+static void
++void
 +native_install_service_thread(void *param __unused, wait_result_t wr __unused)
 +{
 +	static char line[NATIVE_INSTALL_LINE_MAX];
