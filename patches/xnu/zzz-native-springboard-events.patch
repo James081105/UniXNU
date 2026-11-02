@@ -1,0 +1,84 @@
+diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -5283,6 +5283,80 @@ __mac_execve(proc_t p, struct __mac_execve_args *uap, int32_t *retval __unused)
+ 	if (!error) {
+ 		exec_done = TRUE;
+ 		assert(imgp->ip_new_thread != NULL);
++#if defined(XNU_OWNER_CACHE_MOUNT) && XNU_OWNER_CACHE_MOUNT
++		/* SpringBoard is now a running process in the guest, and this is the
++		 * record M9 asks for (milestones.py:2477-2483: "SpringBoard running in
++		 * the guest, from a guest channel").
++		 *
++		 * HERE AND NOT ELSEWHERE.  The site is __mac_execve()'s `if (!error)`
++		 * block, which is the only place in the function where the exec has
++		 * succeeded AND the new process identity can be named: `p` is the
++		 * switched proc (proc_exec_switch_task, three lines above) and p_comm
++		 * was written by set_proc_name() inside exec_mach_imgact().  Not later
++		 * either: process_signature() below can still fail, and a record
++		 * emitted after it would claim a SpringBoard the kernel then refused.
++		 * `exec_done = TRUE` two lines above is the kernel's own "the exec
++		 * occurred" flag, so this record agrees with what the kernel counts.
++		 *
++		 * SpringBoard is exec'd by launchd from userspace, so the kernel only
++		 * ever sees it here -- there is no load_init_program() entry for it,
++		 * which is why the launchd.running emitter's site cannot serve.
++		 *
++		 * GUARDED on XNU_OWNER_CACHE_MOUNT for the reason zzz-m8 records at
++		 * length: build-xnu-4k-baseline.sh:466 passes it as
++		 * kern_exec.o_CFLAGS_ADD and only qemu_root_defconfig sets it, which is
++		 * the same config that puts the console archive on the kernel link.  A
++		 * config with the mount off compiles this out rather than failing to
++		 * link a symbol that config does not provide.
++		 *
++		 * THE EXTERN IS BLOCK-SCOPED, DELIBERATELY.  A file-scope declaration
++		 * would need a second hunk in the include block -- and M8 measured what
++		 * that costs: its hunk at kern_exec.c:186, three lines below the
++		 * #include offline-owner-systemos-mount.patch rewrites at :183, breaks
++		 * the runner's SECOND patch pass with "patch failed:
++		 * bsd/kern/kern_exec.c:183".  Keeping the declaration beside its only
++		 * caller adds no hunk near that line at all, and satisfies the
++		 * visibility rule exactly: declaration and call sit at the same depth.
++		 *
++		 * STRONG, never null-checked: on build 41330622788 a weak_import
++		 * reference resolved to null and dropped two records behind a green
++		 * build, and the `if (symbol)` guard made the absence look deliberate.
++		 * Liveness is answered by the call's return status instead. */
++		if (strncmp(p->p_comm, "SpringBoard", MAXCOMLEN) == 0) {
++			extern int native_console_report(const void *, size_t);
++			extern int proc_pid(proc_t);
++			/* Bounded by construction: 37 prefix + 7 digits + 48 suffix + NUL is
++			 * 93, so a 128-byte buffer can only be under-filled.  The pid is
++			 * hand-formatted because this translation unit does not include the
++			 * header that declares snprintf -- the same constraint M8 records. */
++			static char const springboard_prefix[] =
++			    "{\"event\":\"springboard.running\",\"pid\":";
++			static char const springboard_middle[] =
++			    ",\"comm\":\"SpringBoard\",\"source\":\"XNU.__mac_execve\"}\n";
++			char record[128];
++			unsigned used = 0, pid = (unsigned)proc_pid(p), digits = 0;
++			char text[8];
++			while (used < sizeof(springboard_prefix) - 1) {
++				record[used] = springboard_prefix[used];
++				++used;
++			}
++			if (!pid) {
++				text[digits++] = '0';
++			}
++			while (pid && digits < sizeof(text)) {
++				text[digits++] = (char)('0' + pid % 10);
++				pid /= 10;
++			}
++			while (digits && used < sizeof(record) - 1) {
++				record[used++] = text[--digits];
++			}
++			for (unsigned i = 0; i < sizeof(springboard_middle) - 1 && used < sizeof(record) - 1; ++i) {
++				record[used++] = springboard_middle[i];
++			}
++			record[used] = 0;
++			native_console_report(record, used);
++		}
++#endif
+ 
+ 		exec_resettextvp(p, imgp);
+ 		/*
