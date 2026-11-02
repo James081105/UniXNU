@@ -1,0 +1,410 @@
+diff --git a/bsd/kern/bsd_init.c b/bsd/kern/bsd_init.c
+--- a/bsd/kern/bsd_init.c
++++ b/bsd/kern/bsd_init.c
+@@ -1096,9 +1096,406 @@
+ 
+ 	bsd_init_kprintf("bsd_do_post - done");
+ 
++#if defined(XNU_OWNER_ROOT_TRUST) && XNU_OWNER_ROOT_TRUST && !(defined(XNU_NATIVE_OFFLINE_GPU) && XNU_NATIVE_OFFLINE_GPU)
++	/* The reader's forward declaration.  The definitions live AFTER
++	 * bsdinit_task(), so without this line the call below is a call to an
++	 * undeclared function -- the same class of defect as build 41359711528,
++	 * which failed at kern_exec.c:8120 for exactly that reason, and just as
++	 * invisible to every source-level check because nothing on this host
++	 * preprocesses.  `static` here and `static` at the definition is the
++	 * correct pairing for an internal-linkage function. */
++	static void native_install_service_thread(void *, wait_result_t);
++	/* Start the guest's install service, then raise launchd.  A kernel
++	 * thread rather than work on this one, for the reason
++	 * native_install_service_thread() gives at length: the reader waits,
++	 * and this is init's only context -- blocking here would wait for the
++	 * very launchd load_init_program() is about to raise.
++	 *
++	 * HERE and not earlier.  bsdinit_task() runs after bsd_init() has
++	 * returned, which is after IOKit matching, which is when
++	 * NativeVirtioConsole::start() publishes the port this reads.  The
++	 * margin is measured, not assumed: the console's own announcement is
++	 * observed on the wire at the DarwinBoot hand-off (docs/
++	 * implementation-plan.md, fact 217) and the launchd emitter's call
++	 * site one line below ran at t=64.879 s against a mountroot that
++	 * completed at t=49.614 s (fact 103 / R11c / R11d).  A thread started
++	 * from bsd_init() instead would be earlier and unmeasured.
++	 *
++	 * The thread is deallocated immediately, as kern_memorystatus.c does
++	 * with its own jetsam threads: kernel_thread_start() returns a
++	 * reference the caller owns and the thread keeps running after it is
++	 * dropped. */
++	{
++		thread_t service = THREAD_NULL;
++
++		if (kernel_thread_start(native_install_service_thread, NULL, &service) == KERN_SUCCESS) {
++			thread_deallocate(service);
++		}
++	}
++#endif /* the install service, which is not compiled where the GPU broker is */
+ 	load_init_program(p);
+ 	lock_trace = 1;
+ }
++
++/* A STRONG extern, and declared at UNCONDITIONAL FILE SCOPE -- above the guard
++ * below, not inside it.
++ *
++ * That placement is measured, not stylistic.  Build 41359711528 failed at
++ * `kern_exec.c:8120: error: call to undeclared function 'native_console_report'`
++ * because the caller sat OUTSIDE `#if defined(XNU_OWNER_CACHE_MOUNT)` and the
++ * extern declaring it sat INSIDE, and the build log names the configuration:
++ * "kernel: no owner root chain on disk, so building qemu_defconfig" -- the
++ * first pass, which does not define that macro for this translation unit.  The
++ * result is a link-time or compile-time failure on a configuration nobody was
++ * editing, and it is invisible to every source-level check because nothing on
++ * this host preprocesses.
++ *
++ * A declaration with no definition is free: the linker only resolves a symbol
++ * something REFERENCES, so an unconditional extern costs nothing when the
++ * dispatcher below is compiled out, and it cannot be separated from a caller
++ * that is added later.  Declared here rather than by including
++ * NativeVirtioConsoleTransport.h because that header is on the include path
++ * only for the driver's own build (build-arm-driver.py adds -I
++ * drivers/NativeVirtioConsole when it builds NativeOfflineGPU), not for the
++ * kernel's, so a BSD translation unit cannot see it.  The signature is asserted
++ * against the driver's own header by
++ * tests/unit/test_native_virtio_console_install_service.py, which reads both.
++ *
++ * `int` and not `IOReturn`: IOReturn is a typedef in IOKit/IOReturn.h, which a
++ * BSD file does not include, and kern_return_t is `int` on this platform, so the
++ * two spell the same type.  The status is compared against 0 rather than against
++ * kIOReturnNotOpen for the same reason -- 0 is success for every IOReturn, and
++ * naming the constant would need the IOKit header.
++ *
++ * No __attribute__((weak_import)) and no `if (native_console_poll)` anywhere:
++ * see the note inside the guard. */
++extern int native_console_poll(void *, size_t *);
++
++#if defined(XNU_OWNER_ROOT_TRUST) && XNU_OWNER_ROOT_TRUST && !(defined(XNU_NATIVE_OFFLINE_GPU) && XNU_NATIVE_OFFLINE_GPU)
++/*
++ * The guest's install service, and the one record it emits.
++ *
++ * WHAT THIS IS FOR.  src/unipad/acceptance/milestones.py:1636-1638 clears the
++ * guest_install_service blocker on ONE onsite guest event, install.registered,
++ * and four milestones name that blocker -- M10 at :2649, M10a at :2698, M11 at
++ * :2753 and M12 at :2804.  Nothing in the guest emitted it: the string
++ * install.registered occurs zero times in the kernel the guest boots, measured
++ * byte-level.  This is that emitter.
++ *
++ * WHY IT LIVES HERE AND NOT IN THE DRIVER.  The transport is a byte transport
++ * and its header says so in its first two lines: "Generic exclusive-owner
++ * kernel byte transport. No message/GPU semantics."  Putting install-JSON
++ * knowledge in it would break that contract, and the discrimination would be
++ * unsound besides -- the GPU broker's frames are binary with a magic, so "not
++ * GPU magic therefore install" would silently reclassify every future protocol.
++ * So the driver gains one byte-transport entry point (native_console_poll, the
++ * RX twin of native_console_report) and the protocol lives here, where every
++ * other guest-side emitter on this board already lives.
++ *
++ * WHY THE GUARD IS THESE TWO SWITCHES, AND WHY BOTH ARE REAL.
++ *
++ *   XNU_OWNER_ROOT_TRUST reaches this translation unit at all:
++ *   build-xnu-4k-baseline.sh:329 passes it as bsd_init.o_CFLAGS_ADD.  It is set
++ *   only by qemu_root_defconfig:31 -- the same config that sets
++ *   CONFIG_XNU_NATIVE_VIRTIO_CONSOLE=y at :47, which is what puts
++ *   libNativeVirtioConsole.a on the kernel link with -Wl,-force_load
++ *   (:674-678).  So this code exists exactly where the port it writes to
++ *   exists.  The first-pass defconfig sets neither, so the first pass compiles
++ *   this out rather than failing to link on an undefined symbol.
++ *
++ *   XNU_NATIVE_OFFLINE_GPU is the switch that enables the GPU broker, and it is
++ *   the other half of the guard for a reason that is a measured fact about the
++ *   code rather than a caution.  NativeOfflineGPU::readExact()
++ *   (vendor/UniXNU/drivers/NativeMetal/NativeOfflineGPU.cpp:34-44) drains RX in
++ *   a lock-step loop: it reads until the request's byte count is filled and
++ *   treats ANY short read as kIOReturnIOError, and exchange() then sets
++ *   online=false at :75 -- permanently, because a partial stream cannot be
++ *   reused for another client's reply.  Two consumers of one RX byte stream
++ *   therefore cannot coexist: this dispatcher's line buffering would take bytes
++ *   the broker was counting on and take the broker offline for the rest of the
++ *   boot.  So the moment the broker is revived this dispatcher must not be
++ *   compiled, and the guard says so.  The coupling is asserted rather than
++ *   commented, in tests/unit/test_native_virtio_console_install_service.py.
++ *
++ *   Both macros are on this translation unit's CFLAGS (both are named on that
++ *   same line 329), which is what makes both halves of the guard real tests
++ *   rather than decoration.  A guard naming a macro this file never receives
++ *   would be true whether or not the switch was set -- the shape of defect that
++ *   drops a record behind a green build.
++ *
++ * WHY THERE IS NO NULL CHECK ON THE SYMBOL.  The reference below is a strong
++ * extern, so the definition is load-bearing: if the console archive is ever
++ * missing while this is compiled, the link fails naming the symbol.  A
++ * __attribute__((weak_import)) reference does not oblige the linker to keep the
++ * definition -- MEASURED on build 41330622788, one resolved to null and dropped
++ * two records behind a green build with both records byte-level in the booting
++ * kernel, and the `if (native_console_report)` guard made that absence look
++ * deliberate.  Liveness is answered by the RETURN STATUS instead:
++ * native_console_poll() returns kIOReturnNotOpen while no console is live, so
++ * "the port is not there yet" and "the symbol was never linked" are different
++ * things in this source, and only the first is something to wait for.
++ *
++ * WHAT THIS DISPATCHER DELIBERATELY DOES NOT DO.  It does not answer the host.
++ * Every available answer is either a fabricated success or a veto:
++ *
++ *   - install.response with stage installed or registered must carry a
++ *     bundle_id (GuestClient._reject_fabricated_success, client.py:478-505),
++ *     and this dispatcher installs nothing, so it has no bundle to name.  A
++ *     reply claiming one would be the fabricated success that guard exists for.
++ *   - install.response with stage received, checked or transferred lands in the
++ *     host's install.json (controller/cli.py:2316) and arms the copy_only_install
++ *     veto (milestones.py:1766-1769), which FAILS M10 even with
++ *     install.registered on the wire.  The stage vocabulary is protocol.py:59.
++ *   - install.progress is read by AgentChannelTransport.request as THE reply
++ *     (agent_channel.py:271) and then rejected for its type, which reads on the
++ *     host as "the guest replied wrongly".
++ *
++ * So the host's install op keeps reporting install_service_unavailable, exactly
++ * as it does today, and the record this emits is not derived from a reply the
++ * host accepted.  Wiring the op is separate work with its own evidence.
++ */
++
++/* HOW MUCH THIS COSTS THE PORT, MEASURED AGAINST THE OTHER EMITTERS.
++ *
++ * send() is a synchronous round trip with a two-second deadline, and a
++ * descriptor the device never consumes stays pending -- so every send() after
++ * the first timeout pays another two seconds.  MEASURED on one real boot
++ * (41338826948, guest to t=1514 s): the ring's retained window names 49
++ * distinct PIDs, and PIDs 1-25 happened before it, so at least 75 successful
++ * execs on a boot that stops before SpringBoard, and several hundred on a full
++ * boot.  The daemon.spawned emitter fires once per exec, so it is that volume.
++ *
++ * THIS emitter fires ONCE PER BOOT.  native_install_registered is set before the
++ * record is emitted and is never cleared, and the emission is the patch's only
++ * write to the port, so the worst case this code can add to a stalling drain is
++ * one record and therefore one two-second deadline -- not hundreds.  The bound
++ * is structural rather than a rate limit: no timer, no budget and no backoff
++ * nobody has measured.  The assertion that keeps it that way is
++ * test_the_dispatcher_does_not_answer_the_host, which requires the port to be
++ * written exactly once.
++ *
++ * And the write happens on the dispatcher's own thread, not on init's, so even
++ * that one deadline cannot hold up load_init_program(). */
++
++/* The longest line this dispatcher accumulates, NUL included.  One host frame
++ * is one line of JSON: protocol.py's Message.to_json() uses sort_keys=True and
++ * separators=(",",":") and no newline, so the widest frame the host can send is
++ * an install.request carrying both ADR-0008 optional fields -- roughly 700 bytes
++ * for a 64-character digest and a 64-character certificate fingerprint.  2048
++ * holds that whole with room to spare.  A line that does not fit is dropped
++ * rather than half-parsed, which is the honest outcome for a frame no parser
++ * could validate. */
++#define NATIVE_INSTALL_LINE_MAX 2048
++
++/* How long the reader waits when the port has nothing for it.  Short enough
++ * that a request sent a moment after this thread starts is picked up inside a
++ * boot second, long enough that the wait is not a spin. */
++#define NATIVE_INSTALL_POLL_MS 50
++
++/* kMillisecondScale, which delay_for_interval() takes as its scale factor.
++ * Spelled out rather than named: the constant lives in IOKit/IOTypes.h, this is
++ * a BSD translation unit that does not include IOKit, and guessing which IOKit
++ * header a BSD file may include is a 40-minute build to discover.  Both
++ * primitives this block uses are already declared by headers bsd_init.c
++ * includes -- delay_for_interval() by kern/clock.h at :129 and
++ * kernel_thread_start() by kern/thread.h at :104. */
++#define NATIVE_INSTALL_MS_SCALE (1000 * 1000)
++
++/* The one install this dispatcher has registered.  Set only after a frame that
++ * names a package and a digest has been accepted, so the record below cannot be
++ * emitted by a boot in which no request ever arrived. */
++static int native_install_registered = 0;
++
++/* The record.  A static ARRAY, so sizeof(...) - 1 is the record's own length:
++ * MEASURED 2026-11-01 on a real guest, a ternary selecting between two arrays
++ * of different lengths decays both to a pointer, sizeof becomes 8 on AArch64,
++ * and three records arrived seven bytes long with the build green and the
++ * literals byte-level in the kernel.  The package name is deliberately NOT
++ * formatted into it: that would need a run-time buffer and an escaper, a lossy
++ * substitution would misname the package in the very evidence the gate reads,
++ * and the probe for this event (milestones.py:1528) names the event, not the
++ * package. */
++static char const native_install_record[] =
++    "{\"event\":\"install.registered\",\"source\":\"XNU.native_install_service\"}\n";
++
++/* One bounded byte-for-byte comparison.  Written out rather than using memcmp:
++ * bsd_init.c is a BSD translation unit, which header declares what is a
++ * 40-minute build to discover, and this is six lines. */
++static int
++native_install_equal(const char *a, const char *b, size_t length)
++{
++	size_t index;
++
++	for (index = 0; index < length; index++) {
++		if (a[index] != b[index]) {
++			return 0;
++		}
++	}
++	return 1;
++}
++
++/* The first occurrence of needle in frame, or 0.  A hand-written scan for the
++ * same reason as native_install_equal(): strnstr's declaring header is not
++ * something a BSD file can be assumed to see. */
++static const char *
++native_install_find(const char *frame, size_t length, const char *needle, size_t needle_length)
++{
++	size_t index;
++
++	if (needle_length == 0 || needle_length > length) {
++		return 0;
++	}
++	for (index = 0; index + needle_length <= length; index++) {
++		if (native_install_equal(frame + index, needle, needle_length)) {
++			return frame + index;
++		}
++	}
++	return 0;
++}
++
++/* The length of the value that follows key, or 0 when the key is absent or its
++ * value is empty.  The key is the whole `"name":"` prefix including both quotes
++ * and the colon, because that is exactly what the host's encoder produces:
++ * Message.to_json() uses separators=(",",":"), so there is no space anywhere in
++ * a frame on this wire. */
++static size_t
++native_install_value(const char *frame, size_t length, const char *key, size_t key_length)
++{
++	const char *hit;
++	size_t at, end;
++
++	hit = native_install_find(frame, length, key, key_length);
++	if (hit == 0) {
++		return 0;
++	}
++	at = (size_t)(hit - frame) + key_length;
++	end = at;
++	while (end < length && frame[end] != '"') {
++		end++;
++	}
++	if (end == at) {
++		return 0;            /* an empty value is not a value */
++	}
++	return end - at;
++}
++
++/* The byte sequences the host's own encoder produces, and the only ones this
++ * dispatcher recognises.  A recogniser that also matched `"type": "..."` with a
++ * space would be asserting a wire format the host does not produce. */
++static char const native_install_type_key[] = "\"type\":\"install.request\"";
++static char const native_install_name_key[] = "\"package_name\":\"";
++static char const native_install_digest_key[] = "\"package_sha256\":\"";
++
++/* One line off the port, dispatched.
++ *
++ * frame is one line with its newline already removed and length its byte count.
++ * A line is an install request when it is a JSON object that names the
++ * install.request type AND a non-empty package_name AND a non-empty
++ * package_sha256 -- the three things protocol.py requires of an install request
++ * (InstallRequest.from_dict at :219-226 and _req_str, which rejects an absent or
++ * non-string field).  Anything else is dropped: the channel carries EDK2 and
++ * DarwinBoot console chatter before the kernel speaks at all (MEASURED,
++ * local-private/boot40/arrival/agent.log, 957 bytes of it), so a line that is
++ * not a frame must never be mistaken for one.
++ *
++ * The record is emitted HERE, after the request has been accepted, and not from
++ * the thread's start: an emitter that fired unconditionally would claim a
++ * registration on a boot where no request ever arrived, which is the false
++ * statement this repository's record discipline exists to prevent. */
++static void
++native_install_service(const char *frame, size_t length)
++{
++	if (native_install_registered) {
++		return;                     /* one install, one record */
++	}
++	if (length == 0 || frame[0] != '{') {
++		return;                     /* not a JSON object */
++	}
++	if (native_install_find(frame, length, native_install_type_key,
++	    sizeof native_install_type_key - 1) == 0) {
++		return;
++	}
++	if (native_install_value(frame, length, native_install_name_key,
++	    sizeof native_install_name_key - 1) == 0) {
++		return;                     /* names no package */
++	}
++	if (native_install_value(frame, length, native_install_digest_key,
++	    sizeof native_install_digest_key - 1) == 0) {
++		return;                     /* names no digest */
++	}
++	/* Registered.  This is the furthest statement the code above can prove:
++	 * the guest's install service accepted and recorded a well-formed install
++	 * request.  There is no installer, no image and no bundle table behind
++	 * this, so nothing further is claimed. */
++	native_install_registered = 1;
++	native_console_report(native_install_record, sizeof(native_install_record) - 1);
++}
++
++/* The reader.  One kernel thread, because it waits: for the port to be
++ * published, and for the host to have something to say.  bsdinit_task() is
++ * init's only context and load_init_program() is about to raise the launchd
++ * that publishes IOCoreSurfaceRoot, so blocking here would wait for the thing
++ * this function exists to start (MEASURED, docs/implementation-plan.md fact
++ * 113: a dispatcher that waits inside bsd_init() deadlocks on exactly that).
++ *
++ * The wait is the RETURN STATUS, never a test on whether the symbol resolved.
++ * native_console_poll() returns kIOReturnNotOpen while no console is live, and
++ * every other non-zero status means the same thing to this loop -- the port has
++ * nothing for it right now -- so both are waited out rather than distinguished,
++ * and neither is a reason to stop. */
++static void
++native_install_service_thread(void *param __unused, wait_result_t wr __unused)
++{
++	static char line[NATIVE_INSTALL_LINE_MAX];
++	size_t filled = 0;
++
++	for (;;) {
++		size_t want, got = 0;
++		int status;
++		size_t scan;
++
++		want = NATIVE_INSTALL_LINE_MAX - 1 - filled;
++		if (want == 0) {
++			/* No newline arrived before the buffer filled, so this is not a
++			 * frame any parser could validate.  Drop it whole. */
++			filled = 0;
++			want = NATIVE_INSTALL_LINE_MAX - 1;
++		}
++		got = want;
++		status = native_console_poll(line + filled, &got);
++		if (status != 0 || got == 0) {
++			delay_for_interval(NATIVE_INSTALL_POLL_MS, NATIVE_INSTALL_MS_SCALE);
++			continue;
++		}
++		filled += got;
++
++		/* Every complete line the buffer now holds, in arrival order. */
++		scan = 0;
++		while (scan < filled) {
++			size_t end = scan;
++
++			while (end < filled && line[end] != '\n') {
++				end++;
++			}
++			if (end == filled) {
++				break;                     /* no complete line left */
++			}
++			native_install_service(line + scan, end - scan);
++			scan = end + 1;
++		}
++		/* Keep the partial line; drop what was dispatched. */
++		if (scan > 0) {
++			size_t keep = filled - scan;
++			size_t index;
++
++			for (index = 0; index < keep; index++) {
++				line[index] = line[scan + index];
++			}
++			filled = keep;
++		}
++	}
++}
++#endif /* the install service, which is not compiled where the GPU broker is */
+ 
+ kern_return_t
+ bsd_autoconf(void)
