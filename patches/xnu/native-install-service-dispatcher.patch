@@ -1,24 +1,10 @@
 diff --git a/bsd/kern/bsd_init.c b/bsd/kern/bsd_init.c
 --- a/bsd/kern/bsd_init.c
 +++ b/bsd/kern/bsd_init.c
-@@ -1096,9 +1096,461 @@
+@@ -1096,9 +1096,475 @@
  
  	bsd_init_kprintf("bsd_do_post - done");
  
-+/* The two externs moved ABOVE the first guard on 2026-11-03, because the first
-+ * guard is the one that mattered.  They used to sit below it -- above the
-+ * SECOND guard only -- and the two diag.install_thread_start calls inside the
-+ * first therefore had no declaration in scope, which test_console_declaration_
-+ * visibility.py reported as "call at #if depth 1 with the declaration retired".
-+ * A BSD translation unit cannot see the driver's header (the note below gives
-+ * the reason), and no header anywhere declares the symbol, so that pairing
-+ * fails the macOS compile with "call to undeclared function" -- the exact error
-+ * builds 41359711528, 41364602699 and 41441479230 each paid for.
-+ *
-+ * Their full rationale stays below, above the second guard. */
-+extern int native_console_poll(void *, size_t *);
-+extern int native_console_report(const void *, size_t);
-+
 +#if defined(XNU_OWNER_ROOT_TRUST) && XNU_OWNER_ROOT_TRUST && !(defined(XNU_NATIVE_OFFLINE_GPU) && XNU_NATIVE_OFFLINE_GPU)
 +	/* Start the guest's install service, then raise launchd.  A kernel
 +	 * thread rather than work on this one, for the reason
@@ -61,6 +47,32 @@ diff --git a/bsd/kern/bsd_init.c b/bsd/kern/bsd_init.c
 +		 * only thing that separates them, because the thread's own record
 +		 * cannot distinguish "never ran" from "ran and dropped". */
 +		{
++			/* BLOCK-SCOPED, and this is the second half of a fix whose first half
++			 * was wrong.  Build 41497938605 failed at bsd_init.c:1348 and :1351
++			 * because the only declaration of this symbol sat at file scope
++			 * AFTER bsd_init()'s closing brace, and a file-scope declaration is
++			 * not visible inside a function that has already been compiled past
++			 * it -- it is visible in the functions that FOLLOW, which is why
++			 * native_install_service_thread() below never had a problem.
++			 *
++			 * The first attempt at this fix MOVED the file-scope pair up to just
++			 * before the first guard, on the theory that "before the guard" was
++			 * "outside the function".  It is not: the first guard is INSIDE
++			 * bsd_init(), so the pair landed inside bsd_init() and the thread
++			 * lost its declaration -- build 41506272367 then failed at
++			 * bsd_init.c:1665, :1699 and :1717.
++			 *
++			 * Hence an ADD rather than a MOVE.  The file-scope pair below stays
++			 * exactly where it was, correct for the thread; these two calls get
++			 * their own declaration beside them.  A declaration with no
++			 * definition is free -- the linker only resolves a symbol something
++			 * REFERENCES -- so the duplicate costs nothing.
++			 *
++			 * STRONG, never null-checked, for the reason the file-scope note
++			 * gives at length: on build 41330622788 a weak_import reference
++			 * resolved to null and dropped two records behind a green build,
++			 * and the `if (symbol)` guard made the absence look deliberate. */
++			extern int native_console_report(const void *, size_t);
 +			static char const install_start_ok[] =
 +			    "{\"event\":\"diag.install_thread_start\",\"status\":\"ok\"}\n";
 +			static char const install_start_failed[] =
@@ -111,6 +123,8 @@ diff --git a/bsd/kern/bsd_init.c b/bsd/kern/bsd_init.c
 + *
 + * No __attribute__((weak_import)) and no `if (native_console_poll)` anywhere:
 + * see the note inside the guard. */
++extern int native_console_poll(void *, size_t *);
++extern int native_console_report(const void *, size_t);
 +
 +#if defined(XNU_OWNER_ROOT_TRUST) && XNU_OWNER_ROOT_TRUST && !(defined(XNU_NATIVE_OFFLINE_GPU) && XNU_NATIVE_OFFLINE_GPU)
 +/*
