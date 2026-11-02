@@ -352,9 +352,10 @@
  
  	/*
  	 * So that init task is set with uid,gid 0 token
-@@ -7148,6 +7415,36 @@
+@@ -7148,6 +7415,73 @@
  	mach_vm_size_t map_page_size = vm_map_page_size(map);
  
++#if defined(XNU_OWNER_CACHE_MOUNT) && XNU_OWNER_CACHE_MOUNT
 +/* DIAGNOSTIC, TEMPORARY.  A record at the top of load_init_program(), BEFORE
 + * the prepare calls below and before the init_programs[] loop whose
 + * "attempting to load" line the kernel ring prints at t=71.8.
@@ -369,6 +370,41 @@
 + * This one sits where the ring PROVES execution.  If it arrives, the port
 + * works from kern_exec.c and the question moves to why the prepare call below
 + * does not run.  If it does not, the port is unreachable from this translation
++ *
++ * AND IT NEEDS ITS OWN GUARD.  Measured 2026-11-02, build 41364602699: the
++ * previous revision fixed the undeclared-function error and the build reached
++ * the LINK, which failed with
++ *
++ *     Undefined symbols for architecture arm64:
++ *       "_native_console_report", referenced from:
++ *           _load_init_program in kern_exec.o
++ *
++ * That is the strong extern above doing its job: a missing archive is a loud
++ * error naming the symbol, not two silently dropped records.  The archive is
++ * force-loaded only when NATIVE_VIRTIO_CONSOLE=1
++ * (build-xnu-4k-baseline.sh:666-670), and the switch that is BOTH passed to this
++ * translation unit (:466, as kern_exec.o_CFLAGS_ADD) AND paired with the console
++ * archive is XNU_OWNER_CACHE_MOUNT: qemu_root_defconfig:33 sets it and :47 sets
++ * CONFIG_XNU_NATIVE_VIRTIO_CONSOLE=y, which is what puts
++ * libNativeVirtioConsole.a on the link.  A caller and its definition must
++ * therefore share one guard -- the same rule as the declaration above, one
++ * layer down.
++ *
++ * So this record sits in its OWN #if block, above mach_vm_allocate_kernel.
++ * There is no single position that satisfies both constraints -- this one and
++ * zzz-boot-progress.patch's ten-line context block, nine lines of which this
++ * patch adds -- because the guard's region is in the middle of that block.  An
++ * earlier attempt moved the guard above the whole hunk and was caught red by
++ * test_this_patch_keeps_the_lines_the_next_patch_uses_as_context, which is that
++ * test doing its job.
++ *
++ * This costs nothing in diagnostic power, and that is worth saying exactly:
++ * this record fires at the TOP of load_init_program(), before the prepare
++ * calls, while the mount emitter fires at the END of
++ * native_owner_cache_prepare() gated on !error.  Different points, different
++ * gates.  Diagnostic arrives and emitter does not -> the prepare call did not
++ * run, or error was non-zero.  Neither arrives -> the port is unreachable from
++ * kern_exec.c.  Same conditional, still distinguishable.
 + * unit and the emitter needs a different route entirely. */
 +{
 +	static char const diag_record[] =
@@ -376,6 +412,7 @@
 +	    "\"XNU.load_init_program\"}\n";
 +	native_console_report(diag_record, sizeof(diag_record) - 1);
 +}
++#endif
  	(void) mach_vm_allocate_kernel(map, &scratch_addr, map_page_size, VM_FLAGS_ANYWHERE, VM_KERN_MEMORY_NONE);
 +	user_addr_t init_envp = USER_ADDR_NULL;
 +#if defined(XNU_OWNER_CACHE_MOUNT) && XNU_OWNER_CACHE_MOUNT
@@ -389,7 +426,7 @@
  #if CONFIG_MEMORYSTATUS
  	(void) memorystatus_init_at_boot_snapshot();
  #endif /* CONFIG_MEMORYSTATUS */
-@@ -7162,7 +7459,7 @@
+@@ -7162,7 +7496,7 @@
  
  		if (is_release_suffix) {
  			printf("load_init_program: attempting to load /sbin/launchd\n");
@@ -398,7 +435,7 @@
  			if (!error) {
  				return;
  			}
-@@ -7173,7 +7470,7 @@
+@@ -7173,7 +7507,7 @@
  			strlcat(launchd_path, launchd_suffix, sizeof(launchd_path));
  
  			printf("load_init_program: attempting to load %s\n", launchd_path);
@@ -407,7 +444,7 @@
  			if (!error) {
  				return;
  			} else if (error != ENOENT) {
-@@ -7186,7 +7483,7 @@
+@@ -7186,7 +7520,7 @@
  	error = ENOENT;
  	for (i = 0; i < sizeof(init_programs) / sizeof(init_programs[0]); i++) {
  		printf("load_init_program: attempting to load %s\n", init_programs[i]);
