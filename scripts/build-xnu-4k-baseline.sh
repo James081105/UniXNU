@@ -488,6 +488,13 @@ fi
 # change in the console switch forces vm_unix.o to be rebuilt rather than
 # reusing a stale object.
 EXTRA_MAKE_ARGS+=("vm_unix.o_CFLAGS_ADD=-DXNU_OWNER_CACHE_CARRIER=$OWNER_CACHE_CARRIER -DXNU_OWNER_CACHE_CARRIER_WRONG_UUID=$OWNER_CACHE_CARRIER_WRONG_UUID -DXNU_NATIVE_VIRTIO_CONSOLE=$NATIVE_VIRTIO_CONSOLE")
+
+# kern_exit.o carries the exit half of the exec/exit pair, and it needs the same
+# console macro vm_unix.o gets -- otherwise the emitter is compiled out and the
+# boot is silent about process exits.  A NEW object, not a second entry for an
+# existing one: make takes the LAST <obj>_CFLAGS_ADD, so a second vm_unix.o entry
+# would silently discard the owner-cache-carrier one above.
+EXTRA_MAKE_ARGS+=("kern_exit.o_CFLAGS_ADD=-DXNU_NATIVE_VIRTIO_CONSOLE=$NATIVE_VIRTIO_CONSOLE")
 OWNER_CARRIER_STAMP=$ROOT/build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/.owner-cache-carrier-mode
 if [ "$(cat "$OWNER_CARRIER_STAMP" 2>/dev/null || echo 0:0:0)" != "$OWNER_CACHE_CARRIER:$OWNER_CACHE_CARRIER_WRONG_UUID:$NATIVE_VIRTIO_CONSOLE" ]; then
   rm -f "$ROOT/build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/bsd/DEVELOPMENT/vm_unix.o"

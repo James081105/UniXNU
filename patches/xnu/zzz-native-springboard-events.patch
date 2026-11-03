@@ -193,3 +193,122 @@ diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
  
  		exec_resettextvp(p, imgp);
  		/*
+diff --git a/bsd/kern/kern_exit.c b/bsd/kern/kern_exit.c
+--- a/bsd/kern/kern_exit.c
++++ b/bsd/kern/kern_exit.c
+@@ -1502,6 +1502,115 @@
+ 	struct uthread *ut;
+ 	int error = 0;
+ 	bool proc_exiting = false;
++#if defined(XNU_NATIVE_VIRTIO_CONSOLE) && XNU_NATIVE_VIRTIO_CONSOLE
++		/* EVERY PROCESS EXIT UP TO A BOUND, because the exec record proved
++		 * what started and nothing observes what finished.
++		 *
++		 * MEASURED 2026-11-03 on build 41646368244's guest:
++		 *
++		 *   {"event":"exec.seen","n":1,"comm":"launchd",...}
++		 *   {"event":"exec.seen","n":2,"comm":"apfs_boot_util",...}
++		 *
++		 * Two execs against a bound of twelve, so launchd DID spawn -- it is
++		 * not stuck before its first job -- and then nothing.  apfs_boot_util
++		 * is n=2, which means it was exec'd after launchd started; a process
++		 * the kernel spawned during bsd_init() would be n=1.  No reference to
++		 * it exists in this tree, so launchd ran it from a plist.
++		 *
++		 * WHAT THAT CANNOT SAY, and the reason this exists: whether it
++		 * RETURNED.  The exec record proves a process started.  Nothing on the
++		 * channel observes an exit, so a boot that stops after
++		 * apfs_boot_util is equally consistent with it hanging inside that
++		 * binary and with it returning and launchd stalling afterwards.
++		 * Those are different findings with different next steps, and the fork
++		 * has to be measured rather than argued -- the last three forks were,
++		 * and each one was wrong the first time.
++		 *
++		 * BOUNDED at kMaxExitRecords for the same reason the exec record is:
++		 * the channel's send() waits synchronously on a 2000 ms deadline
++		 * (NativeVirtioConsole.cpp:226 sets it, :250 is the wait), so an
++		 * unbounded emitter here charges one deadline per exit in the boot.
++		 *
++		 * HERE AND NOT IN exit1(): exit1() is a three-line wrapper around
++		 * exit1_internal(), which is itself a wrapper.  exit_with_reason() is
++		 * the body they all reach, and p->p_comm is still valid at its top --
++		 * the DEVELOPMENT block fifteen lines below reads it.
++		 *
++		 * THE COMM SCAN USES sizeof(p->p_comm), NOT MAXCOMLEN, because this
++		 * translation unit does not get kern_exec.o's CFLAGS and MAXCOMLEN is
++		 * not guaranteed visible here.  p_comm is char[MAXCOMLEN+1], so
++		 * sizeof is the right bound and needs no macro.
++		 *
++		 * GUARDED ON XNU_NATIVE_VIRTIO_CONSOLE, which
++		 * build-xnu-4k-baseline.sh now passes to kern_exit.o for exactly this.
++		 * Not XNU_OWNER_CACHE_MOUNT: that macro is kern_exec.o's, so the
++		 * emitter would compile out here and the boot would be silent about
++		 * exits for a reason no compiler reports.  The exec record keeps its
++		 * own guard; the two halves of the pair sit in different translation
++		 * units and each needs the macro its own object is actually given.
++		 *
++		 * AND THE LITERAL WILL NOT BE GREPPABLE IN THE IMAGE, which is
++		 * measured and not guessed: ld's SHF_MERGE|SHF_STRINGS pass split the
++		 * exec record's 30-byte literal into a 16-byte head plus a shared
++		 * tail, so exec.seen counts ZERO as a contiguous byte string in the
++		 * kernel that carries it.  The record arrives on the wire complete.
++		 * The block-scope static is what proves the code is there.
++		 */
++		{
++			extern int native_console_report(const void *, size_t);
++			enum { kMaxExitRecords = 12 };
++			static char const exit_prefix[] =
++			    "{\"event\":\"exit.seen\",\"n\":";
++			static char const exit_middle[] = ",\"comm\":\"";
++			static char const exit_suffix[] =
++			    "\",\"source\":\"XNU.exit_with_reason\"}\n";
++			static unsigned native_exit_records = 0;
++			char record[128];
++			unsigned used = 0, i = 0, safe = 1;
++			char c;
++			while (i < sizeof(p->p_comm) && (c = p->p_comm[i]) != 0) {
++				if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
++				    || (c >= '0' && c <= '9') || c == '.' || c == '_'
++				    || c == '-')) {
++					safe = 0;
++				}
++				++i;
++			}
++			if (native_exit_records < kMaxExitRecords && safe && i != 0) {
++				unsigned n, digits = 0;
++				char text[4];
++				++native_exit_records;
++				n = native_exit_records;
++				while (used < sizeof(exit_prefix) - 1) {
++					record[used] = exit_prefix[used];
++					++used;
++				}
++				if (!n) {
++					text[digits++] = '0';
++				}
++				while (n && digits < sizeof(text)) {
++					text[digits++] = (char)('0' + n % 10);
++					n /= 10;
++				}
++				while (digits && used < sizeof(record) - 1) {
++					record[used++] = text[--digits];
++				}
++				for (unsigned k = 0; k < sizeof(exit_middle) - 1
++				    && used < sizeof(record) - 1; ++k) {
++					record[used++] = exit_middle[k];
++				}
++				for (unsigned k = 0; k < i && used < sizeof(record) - 1; ++k) {
++					record[used++] = p->p_comm[k];
++				}
++				for (unsigned k = 0; k < sizeof(exit_suffix) - 1
++				    && used < sizeof(record) - 1; ++k) {
++					record[used++] = exit_suffix[k];
++				}
++				record[used] = 0;
++				native_console_report(record, used);
++			}
++		}
++#endif
+ 
+ #if DEVELOPMENT || DEBUG
+ 	/*
