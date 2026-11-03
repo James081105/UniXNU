@@ -1,7 +1,7 @@
 diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
 --- a/bsd/kern/kern_exec.c
 +++ b/bsd/kern/kern_exec.c
-@@ -5283,6 +5283,191 @@ __mac_execve(proc_t p, struct __mac_execve_args *uap, int32_t *retval __unused)
+@@ -5283,6 +5283,209 @@ __mac_execve(proc_t p, struct __mac_execve_args *uap, int32_t *retval __unused)
  	if (!error) {
  		exec_done = TRUE;
  		assert(imgp->ip_new_thread != NULL);
@@ -110,9 +110,27 @@ diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
 +		 * record exists in this shape: the channel's send() waits
 +		 * synchronously on a 2000 ms deadline (NativeVirtioConsole.cpp:226
 +		 * sets it, :250 is the wait), so an unbounded emitter here would
-+		 * charge one deadline per exec for the entire boot.  Twelve is enough
-+		 * to see launchd and its first eleven children, which is the whole
-+		 * question, and costs at most twelve deadlines.
++		 * charge one deadline per exec for the entire boot.
++		 *
++		 * THE BOUND WAS TWELVE AND TWELVE WAS WRONG, which is the third time
++		 * a bound on an emitter has been read as a fact about the guest.
++		 * MEASURED 2026-11-04 on build 41671199388: the exec record fired
++		 * twice -- launchd, then apfs_boot_util -- and I concluded the boot had
++		 * stopped there.  It had not.  The exit record, added next, showed
++		 * launchd working through fsck, mount, seputil, mobile_obliteration,
++		 * apfs_boot_util, MSUEarlyBootTask, cc_fips_test, keybagd,
++		 * usermanagerd and dirs_cleaner -- TWELVE EXITS when ITS bound
++		 * saturated, every one of them a process that ran and exited and so
++		 * produced no second exec for the exec record to see.  A process that
++		 * runs and exits is invisible to an exec-only instrument.
++		 *
++		 * So the bound is sixty-four.  The cost argument for twelve was the
++		 * 2000 ms deadline, and the measurement says it was too pessimistic:
++		 * twelve records arrived over roughly 100 s of guest time, about one
++		 * per eight seconds, which is the boot's own pace on TCG and not the
++		 * transport's.  Sixty-four is a few extra minutes on a boot that
++		 * already takes fifteen hundred, and it covers the whole early boot
++		 * chain rather than its first ten tasks.
 +		 *
 +		 * The comm is emitted only if every byte is in [A-Za-z0-9._-].  Not
 +		 * tidiness: this record is hand-assembled JSON with no escaping, and a
@@ -137,7 +155,7 @@ diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
 +		 * boot on a missing literal would have thrown this boot away. */
 +		{
 +			extern int native_console_report(const void *, size_t);
-+			enum { kMaxExecRecords = 12 };
++			enum { kMaxExecRecords = 64 };
 +			static char const exec_prefix[] =
 +			    "{\"event\":\"exec.seen\",\"n\":";
 +			static char const exec_middle[] = ",\"comm\":\"";
@@ -196,7 +214,7 @@ diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
 diff --git a/bsd/kern/kern_exit.c b/bsd/kern/kern_exit.c
 --- a/bsd/kern/kern_exit.c
 +++ b/bsd/kern/kern_exit.c
-@@ -1502,6 +1502,115 @@
+@@ -1502,6 +1502,120 @@
  	struct uthread *ut;
  	int error = 0;
  	bool proc_exiting = false;
@@ -224,10 +242,15 @@ diff --git a/bsd/kern/kern_exit.c b/bsd/kern/kern_exit.c
 +		 * has to be measured rather than argued -- the last three forks were,
 +		 * and each one was wrong the first time.
 +		 *
-+		 * BOUNDED at kMaxExitRecords for the same reason the exec record is:
-+		 * the channel's send() waits synchronously on a 2000 ms deadline
-+		 * (NativeVirtioConsole.cpp:226 sets it, :250 is the wait), so an
-+		 * unbounded emitter here charges one deadline per exit in the boot.
++		 * BOUNDED at kMaxExitRecords, and the first bound of twelve was
++		 * exactly what made the previous conclusion wrong: it saturated at
++		 * dirs_cleaner and hid everything after it, which is where the
++		 * interesting processes are.  Sixty-four now, for the same reason the
++		 * exec record's bound went to sixty-four -- the channel's send()
++		 * waits synchronously on a 2000 ms deadline
++		 * (NativeVirtioConsole.cpp:226 sets it, :250 is the wait), but the
++		 * measured pace is one record per eight seconds of guest time, which
++		 * is the boot's own and not the transport's.
 +		 *
 +		 * HERE AND NOT IN exit1(): exit1() is a three-line wrapper around
 +		 * exit1_internal(), which is itself a wrapper.  exit_with_reason() is
@@ -256,7 +279,7 @@ diff --git a/bsd/kern/kern_exit.c b/bsd/kern/kern_exit.c
 +		 */
 +		{
 +			extern int native_console_report(const void *, size_t);
-+			enum { kMaxExitRecords = 12 };
++			enum { kMaxExitRecords = 64 };
 +			static char const exit_prefix[] =
 +			    "{\"event\":\"exit.seen\",\"n\":";
 +			static char const exit_middle[] = ",\"comm\":\"";
