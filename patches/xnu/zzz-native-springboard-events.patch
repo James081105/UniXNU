@@ -1,7 +1,7 @@
 diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
 --- a/bsd/kern/kern_exec.c
 +++ b/bsd/kern/kern_exec.c
-@@ -5283,6 +5283,147 @@ __mac_execve(proc_t p, struct __mac_execve_args *uap, int32_t *retval __unused)
+@@ -5283,6 +5283,190 @@ __mac_execve(proc_t p, struct __mac_execve_args *uap, int32_t *retval __unused)
  	if (!error) {
  		exec_done = TRUE;
  		assert(imgp->ip_new_thread != NULL);
@@ -78,45 +78,72 @@ diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
 +			record[used] = 0;
 +			native_console_report(record, used);
 +		}
-+		/* THE FIRST SUCCESSFUL EXEC, WHATEVER IT IS.  M9 is blocked because
-+		 * the userspace boot stops somewhere after dyld runs, and the only
-+		 * record that fires past it is dyld.cache_read -- one per boot, and it
-+		 * names nothing (native-dyld-cache-read.patch: "No pid, because a
-+		 * formatted pid would put a formatting path in front of a record whose
-+		 * only job is to arrive whole").  So one dyld.cache_read proves a
-+		 * process ran dyld and does not say which.
++		/* EVERY SUCCESSFUL EXEC UP TO A BOUND, because the once-per-boot
++		 * version of this record answered its question and immediately hit
++		 * the limit of what it could say.
 +		 *
-+		 * MEASURED 2026-11-03 on build 41584103771's guest, and the reason
-+		 * this exists: dyld.cache_read arrived, diag.owner_data_status
-+		 * reported stage 4 ("the mount verified") and diag.legacy_display_status
-+		 * reported stage 10 (the display started) -- and springboard.running
-+		 * did not, in 1500 s.  The Data mount was the recorded prime suspect
-+		 * for the stall and the stage-4 record cleared it.  What is left is
-+		 * launchd or its first child, and nothing on the channel names it.
++		 * MEASURED 2026-11-03, build 41617257137's guest:
 +		 *
-+		 * Bounded by a flag set before the emit and never cleared, the same
-+		 * bound native-dyld-cache-read.patch uses, for the same reason: the
-+		 * channel's send() waits synchronously on a 2000 ms deadline
-+		 * (NativeVirtioConsole.cpp:226 sets it, :250 is the wait), so an
-+		 * unbounded emitter here charges one deadline per exec in the boot.
++		 *   {"event":"exec.first","comm":"launchd","source":"XNU.__mac_execve"}
++		 *
++		 * The first successful exec is launchd, so load_init_program() found
++		 * it, exec_mach_imgact() wrote its p_comm and dyld then mapped the
++		 * shared cache in it.  The same boot reproduced both of the previous
++		 * build's records exactly -- diag.legacy_display_status stage 10 and
++		 * diag.owner_data_status stage 4 with error 0 -- and still produced no
++		 * springboard.running in 1500 s.  So the userspace boot stops INSIDE
++		 * launchd, after dyld initialises and before SpringBoard is exec'd.
++		 *
++		 * WHAT THE ONCE-PER-BOOT BOUND CANNOT SAY, and the reason this is now
++		 * a sequence.  I recorded in the same interval that "one
++		 * dyld.cache_read means the userspace boot stopped very early".  That
++		 * was wrong and the patch it came from says why: native-dyld-cache-read
++		 * bounds its emitter to ONE record per boot, so it cannot count
++		 * processes.  Launchd could spawn fifty daemons and the channel would
++		 * still carry exactly one dyld.cache_read.  Whether launchd spawned
++		 * anything at all is therefore unmeasured, and it is the fork that
++		 * decides the next step: spawned nothing means launchd is stuck early;
++		 * spawned something but not SpringBoard means the stall is later, or
++		 * SpringBoard's own exec is being refused.
++		 *
++		 * BOUNDED at kMaxExecRecords, and the bound is the whole reason the
++		 * record exists in this shape: the channel's send() waits
++		 * synchronously on a 2000 ms deadline (NativeVirtioConsole.cpp:226
++		 * sets it, :250 is the wait), so an unbounded emitter here would
++		 * charge one deadline per exec for the entire boot.  Twelve is enough
++		 * to see launchd and its first eleven children, which is the whole
++		 * question, and costs at most twelve deadlines.
 +		 *
 +		 * The comm is emitted only if every byte is in [A-Za-z0-9._-].  Not
 +		 * tidiness: this record is hand-assembled JSON with no escaping, and a
 +		 * comm carrying a quote or a backslash would put a record on the wire
 +		 * no parser accepts.  Refusing to emit is a silence, which is already
 +		 * the state; emitting garbage is a false result.  A name that cannot
-+		 * be encoded does not consume the one shot.
++		 * be encoded does not consume one of the twelve.
 +		 *
 +		 * AFTER the SpringBoard block and not before it, so the record M9 asks
-+		 * for is emitted first when the first exec IS SpringBoard, and a
-+		 * generic record never displaces it. */
++		 * for is emitted first when the exec IS SpringBoard, and a generic
++		 * record never displaces it.
++		 *
++		 * AND THE LITERAL IS NOT GREPPABLE IN THE IMAGE, which is measured and
++		 * not guessed.  The once-per-boot version's `exec.first` literal
++		 * counted ZERO as a contiguous byte string in the kernel that carried
++		 * it, because ld's SHF_MERGE|SHF_STRINGS pass split the 30-byte string
++		 * into a 16-byte head plus a shared tail -- while the block-scope
++		 * static `___mac_execve.native_first_exec_reported` was absent from
++		 * the previous kernel and present in that one.  The record arrived on
++		 * the wire complete and correct, so the array is right at runtime; it
++		 * is only the byte search that is blind.  A capture that refuses to
++		 * boot on a missing literal would have thrown this boot away. */
 +		{
 +			extern int native_console_report(const void *, size_t);
-+			static char const first_exec_prefix[] =
-+			    "{\"event\":\"exec.first\",\"comm\":\"";
-+			static char const first_exec_suffix[] =
++			enum { kMaxExecRecords = 12 };
++			static char const exec_prefix[] =
++			    "{\"event\":\"exec.seen\",\"n\":";
++			static char const exec_middle[] = ",\"comm\":\"";
++			static char const exec_suffix[] =
 +			    "\",\"source\":\"XNU.__mac_execve\"}\n";
-+			static int native_first_exec_reported = 0;
++			static unsigned native_exec_records = 0;
 +			char record[128];
 +			unsigned used = 0, i = 0, safe = 1;
 +			char c;
@@ -128,24 +155,40 @@ diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
 +				}
 +				++i;
 +			}
-+			if (!native_first_exec_reported && safe && i != 0) {
-+				native_first_exec_reported = 1;
-+				while (used < sizeof(first_exec_prefix) - 1) {
-+					record[used] = first_exec_prefix[used];
++			if (native_exec_records < kMaxExecRecords && safe && i != 0) {
++				unsigned n, digits = 0;
++				char text[4];
++				++native_exec_records;
++				n = native_exec_records;
++				while (used < sizeof(exec_prefix) - 1) {
++					record[used] = exec_prefix[used];
 +					++used;
++				}
++				if (!n) {
++					text[digits++] = '0';
++				}
++				while (n && digits < sizeof(text)) {
++					text[digits++] = (char)('0' + n % 10);
++					n /= 10;
++				}
++				while (digits && used < sizeof(record) - 1) {
++					record[used++] = text[--digits];
++				}
++				for (unsigned k = 0; k < sizeof(exec_middle) - 1
++				    && used < sizeof(record) - 1; ++k) {
++					record[used++] = exec_middle[k];
 +				}
 +				for (unsigned k = 0; k < i && used < sizeof(record) - 1; ++k) {
 +					record[used++] = p->p_comm[k];
 +				}
-+				for (unsigned k = 0; k < sizeof(first_exec_suffix) - 1
++				for (unsigned k = 0; k < sizeof(exec_suffix) - 1
 +				    && used < sizeof(record) - 1; ++k) {
-+					record[used++] = first_exec_suffix[k];
++					record[used++] = exec_suffix[k];
 +				}
 +				record[used] = 0;
 +				native_console_report(record, used);
 +			}
 +		}
-+#endif
  
  		exec_resettextvp(p, imgp);
  		/*
