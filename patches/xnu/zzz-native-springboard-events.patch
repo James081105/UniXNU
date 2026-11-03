@@ -377,3 +377,139 @@ diff --git a/bsd/kern/kern_exit.c b/bsd/kern/kern_exit.c
  
  #if DEVELOPMENT || DEBUG
  	/*
+diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -4281,6 +4281,132 @@
+ 		p = proc_exec_switch_task(current_proc(), p, old_task, new_task, imgp, &inherit);
+ 		/* proc ref returned */
+ 		should_release_proc_ref = TRUE;
++#if defined(XNU_OWNER_CACHE_MOUNT) && XNU_OWNER_CACHE_MOUNT
++		/* THE OTHER EXEC PATH.  XNU has two, and the emitter that names
++		 * processes was only on one of them:
++		 *
++		 *   execve()      -> execve()      -> __mac_execve()  :5284
++		 *   posix_spawn() -> posix_spawn() -> this block      :4280
++		 *
++		 * posix_spawn() WITHOUT POSIX_SPAWN_SETEXEC forks and execs in the
++		 * child, and launchd spawns its daemons with posix_spawn.  MEASURED
++		 * 2026-11-04 on build 41708386711: 28 exits and 2 execs.  Twenty-six
++		 * processes took a path the exec emitter cannot see.
++		 *
++		 * AND THAT IS WHY M9 WAS NEVER MEASURABLE.  springboard.running is
++		 * emitted from __mac_execve()'s success block, and SpringBoard is
++		 * exec'd by launchd from userspace -- by posix_spawn.  The record M9
++		 * asks for was on a path the process it asks about does not take.  Its
++		 * absence was an instrument defect, not a guest fact.
++		 *
++		 * SO THE SAME TWO RECORDS ARE EMITTED HERE.  springboard.running
++		 * carries the same event name M9 greps for -- the gate does not care
++		 * which function emitted it, and it should not -- and the generic one
++		 * is spawn.seen rather than exec.seen so a reader can tell the two
++		 * paths apart, which is the whole point of adding it.
++		 *
++		 * GUARDED ON XNU_OWNER_CACHE_MOUNT, which is kern_exec.o's macro and
++		 * posix_spawn() is in kern_exec.c, so the guard is right here.  (The
++		 * exit record lives in kern_exit.c and needs
++		 * XNU_NATIVE_VIRTIO_CONSOLE instead; the macro is per-object.)
++		 *
++		 * PLACED INSIDE `if (error == 0 && !spawn_no_exec)`, AFTER
++		 * proc_exec_switch_task(), so p is the switched proc and p_comm has
++		 * been written by set_proc_name() inside exec_mach_imgact() -- the
++		 * same common machinery __mac_execve uses, fifteen hundred lines
++		 * below.
++		 *
++		 * BOUNDED at kMaxSpawnRecords for the reason every emitter here is:
++		 * the channel's send() waits synchronously on a 2000 ms deadline
++		 * (NativeVirtioConsole.cpp:226 sets it, :250 is the wait).
++		 */
++		{
++			extern int native_console_report(const void *, size_t);
++			extern int proc_pid(proc_t);
++			if (strncmp(p->p_comm, "SpringBoard", MAXCOMLEN) == 0) {
++				static char const spawn_sb_prefix[] =
++				    "{\"event\":\"springboard.running\",\"pid\":";
++				static char const spawn_sb_middle[] =
++				    ",\"comm\":\"SpringBoard\",\"source\":\"XNU.posix_spawn\"}\n";
++				char record[128];
++				unsigned used = 0, pid = (unsigned)proc_pid(p), digits = 0;
++				char text[8];
++				while (used < sizeof(spawn_sb_prefix) - 1) {
++					record[used] = spawn_sb_prefix[used];
++					++used;
++				}
++				if (!pid) {
++					text[digits++] = '0';
++				}
++				while (pid && digits < sizeof(text)) {
++					text[digits++] = (char)('0' + pid % 10);
++					pid /= 10;
++				}
++				while (digits && used < sizeof(record) - 1) {
++					record[used++] = text[--digits];
++				}
++				for (unsigned k = 0; k < sizeof(spawn_sb_middle) - 1
++				    && used < sizeof(record) - 1; ++k) {
++					record[used++] = spawn_sb_middle[k];
++				}
++				record[used] = 0;
++				native_console_report(record, used);
++			}
++			{
++				enum { kMaxSpawnRecords = 64 };
++				static char const spawn_prefix[] =
++				    "{\"event\":\"spawn.seen\",\"n\":";
++				static char const spawn_middle[] = ",\"comm\":\"";
++				static char const spawn_suffix[] =
++				    "\",\"source\":\"XNU.posix_spawn\"}\n";
++				static unsigned native_spawn_records = 0;
++				char record[128];
++				unsigned used = 0, i = 0, safe = 1;
++				char c;
++				while (i < MAXCOMLEN && (c = p->p_comm[i]) != 0) {
++					if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
++					    || (c >= '0' && c <= '9') || c == '.' || c == '_'
++					    || c == '-')) {
++						safe = 0;
++					}
++					++i;
++				}
++				if (native_spawn_records < kMaxSpawnRecords && safe && i != 0) {
++					unsigned n, digits = 0;
++					char text[4];
++					++native_spawn_records;
++					n = native_spawn_records;
++					while (used < sizeof(spawn_prefix) - 1) {
++						record[used] = spawn_prefix[used];
++						++used;
++					}
++					if (!n) {
++						text[digits++] = '0';
++					}
++					while (n && digits < sizeof(text)) {
++						text[digits++] = (char)('0' + n % 10);
++						n /= 10;
++					}
++					while (digits && used < sizeof(record) - 1) {
++						record[used++] = text[--digits];
++					}
++					for (unsigned k = 0; k < sizeof(spawn_middle) - 1
++					    && used < sizeof(record) - 1; ++k) {
++						record[used++] = spawn_middle[k];
++					}
++					for (unsigned k = 0; k < i && used < sizeof(record) - 1; ++k) {
++						record[used++] = p->p_comm[k];
++					}
++					for (unsigned k = 0; k < sizeof(spawn_suffix) - 1
++					    && used < sizeof(record) - 1; ++k) {
++						record[used++] = spawn_suffix[k];
++					}
++					record[used] = 0;
++					native_console_report(record, used);
++				}
++			}
++		}
++#endif
+ 	}
+ 
+ 	if (error == 0) {
