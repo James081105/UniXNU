@@ -456,7 +456,7 @@ diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
 +				native_console_report(record, used);
 +			}
 +			{
-+				enum { kMaxSpawnRecords = 64 };
++				enum { kMaxSpawnRecords = 512 };
 +				static char const spawn_prefix[] =
 +				    "{\"event\":\"spawn.seen\",\"n\":";
 +				static char const spawn_middle[] = ",\"comm\":\"";
