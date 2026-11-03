@@ -1,7 +1,7 @@
 diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
 --- a/bsd/kern/kern_exec.c
 +++ b/bsd/kern/kern_exec.c
-@@ -5283,6 +5283,190 @@ __mac_execve(proc_t p, struct __mac_execve_args *uap, int32_t *retval __unused)
+@@ -5283,6 +5283,191 @@ __mac_execve(proc_t p, struct __mac_execve_args *uap, int32_t *retval __unused)
  	if (!error) {
  		exec_done = TRUE;
  		assert(imgp->ip_new_thread != NULL);
@@ -189,6 +189,7 @@ diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
 +				native_console_report(record, used);
 +			}
 +		}
++#endif
  
  		exec_resettextvp(p, imgp);
  		/*
