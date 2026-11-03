@@ -9,7 +9,7 @@
  
  #include <mach/exclaves.h>
  
-@@ -7013,8 +7013,332 @@
+@@ -7013,8 +7013,420 @@
   *		word width of the kernel. Once the self-exec completes, the
   *		initproc might be different.
   */
@@ -265,6 +265,43 @@
 +#endif
 +extern dev_t mdevlookup(int);
 +extern int mdevgetrange(int, uint64_t *, uint64_t *);
++/* Append one bounded literal to a record buffer.  Returns the new length,
++ * which never exceeds size - 1, so a caller cannot walk off the end by
++ * concatenating more parts than the buffer holds. */
++static unsigned
++native_owner_data_put_literal(char *record, unsigned used, unsigned size,
++    char const *text, unsigned length)
++{
++	for (unsigned i = 0; i < length && used < size - 1; ++i) {
++		record[used++] = text[i];
++	}
++	return used;
++}
++
++/* Append one unsigned decimal, hand-formatted.  This translation unit does
++ * not include the header that declares snprintf -- the same constraint
++ * zzz-native-springboard-events.patch records and works around the same way.
++ * Ten digits is the widest a 32-bit value can be, so text[8] truncates rather
++ * than overflows and the loop below is bounded by it. */
++static unsigned
++native_owner_data_put_unsigned(char *record, unsigned used, unsigned size,
++    unsigned value)
++{
++	char text[10];
++	unsigned digits = 0;
++	if (!value) {
++		text[digits++] = '0';
++	}
++	while (value && digits < sizeof(text)) {
++		text[digits++] = (char)('0' + value % 10);
++		value /= 10;
++	}
++	while (digits && used < size - 1) {
++		record[used++] = text[--digits];
++	}
++	return used;
++}
++
 +volatile int native_owner_data_status = -1;
 +volatile int native_owner_data_stage = 0;
 +volatile int native_owner_data_readonly = -1;
@@ -334,6 +371,57 @@
 +done:
 +	if (data_root) vnode_put(data_root);
 +	native_owner_data_status = error;
++	/* THE ONE OBSERVABLE POINT IN THIS FUNCTION, and it was missing.
++	 *
++	 * Every failure above is a `goto done`, and the caller's only response is
++	 * panic("offline scratch Data mount failed: %d") -- whose text goes to
++	 * XNU's printf console, which on this board is neither the serial port
++	 * (unixnu_boot.py:468-469, measured) nor the frame buffer.  So a Data mount
++	 * failure, a hang in the launchd loop below it, and a boot that is merely
++	 * slow on TCG all produce the same thing from the host: silence.  Measured
++	 * on boot 53, where the channel delivered 17 records ending at
++	 * system.volume_identity and then nothing for 540 s.
++	 *
++	 * native_owner_data_stage is the diagnostic, and it is already maintained
++	 * by every path in this function: 0 the seed was not found or its geometry
++	 * was rejected, 1 the copyout of the mount arguments failed, 2 mount()
++	 * failed, 3 vnode_lookup failed, 4 the mount verified.  Reporting it costs
++	 * nothing and turns "the guest went quiet" into "the guest stopped here".
++	 *
++	 * Bounded by construction: 44 prefix + 1 stage digit + 9 middle + 2 error
++	 * digits + 45 suffix + NUL is 102, so a 160-byte buffer can only be
++	 * under-filled, and every append is bounded by size - 1 regardless.
++	 *
++	 * No declaration here: the file-scope strong extern at the top of this
++	 * block is 888 lines above this function in the assembled tree and outside
++	 * every guard, so it is visible.  An earlier draft of this emitter added a
++	 * block-scoped copy on the reasoning that native-install-service-dispatcher
++	 * .patch needed one at both scopes -- that patch needed it because ITS
++	 * caller sits above ITS declaration, which is not the case here.  The
++	 * duplicate was caught by test_the_console_reference_is_strong_not_weak,
++	 * which asserts exactly one declaration, and that test was right. */
++	{
++		static char const data_prefix[] =
++		    "{\"event\":\"diag.owner_data_status\",\"stage\":";
++		static char const data_middle[] =
++		    ",\"error\":";
++		static char const data_suffix[] =
++		    ",\"source\":\"XNU.native_owner_data_prepare\"}\n";
++		char record[160];
++		unsigned used = 0;
++		used = native_owner_data_put_literal(record, used, sizeof(record),
++		    data_prefix, sizeof(data_prefix) - 1);
++		used = native_owner_data_put_unsigned(record, used, sizeof(record),
++		    (unsigned)native_owner_data_stage);
++		used = native_owner_data_put_literal(record, used, sizeof(record),
++		    data_middle, sizeof(data_middle) - 1);
++		used = native_owner_data_put_unsigned(record, used, sizeof(record),
++		    (error < 0) ? 0u : (unsigned)error);
++		used = native_owner_data_put_literal(record, used, sizeof(record),
++		    data_suffix, sizeof(data_suffix) - 1);
++		record[used] = 0;
++		native_console_report(record, used);
++	}
 +	return error;
 +}
 +#endif
@@ -343,7 +431,7 @@
  {
  	int retval[2];
  	int error;
-@@ -7086,7 +7353,7 @@
+@@ -7086,7 +7498,7 @@
  	 */
  	init_exec_args.fname = argv0;
  	init_exec_args.argp = scratch_addr;
@@ -352,7 +440,7 @@
  
  	/*
  	 * So that init task is set with uid,gid 0 token
-@@ -7148,6 +7415,73 @@
+@@ -7148,6 +7560,73 @@
  	mach_vm_size_t map_page_size = vm_map_page_size(map);
  
 +#if defined(XNU_OWNER_CACHE_MOUNT) && XNU_OWNER_CACHE_MOUNT
@@ -426,7 +514,7 @@
  #if CONFIG_MEMORYSTATUS
  	(void) memorystatus_init_at_boot_snapshot();
  #endif /* CONFIG_MEMORYSTATUS */
-@@ -7162,7 +7496,7 @@
+@@ -7162,7 +7641,7 @@
  
  		if (is_release_suffix) {
  			printf("load_init_program: attempting to load /sbin/launchd\n");
@@ -435,7 +523,7 @@
  			if (!error) {
  				return;
  			}
-@@ -7173,7 +7507,7 @@
+@@ -7173,7 +7652,7 @@
  			strlcat(launchd_path, launchd_suffix, sizeof(launchd_path));
  
  			printf("load_init_program: attempting to load %s\n", launchd_path);
@@ -444,7 +532,7 @@
  			if (!error) {
  				return;
  			} else if (error != ENOENT) {
-@@ -7186,7 +7520,7 @@
+@@ -7186,7 +7665,7 @@
  	error = ENOENT;
  	for (i = 0; i < sizeof(init_programs) / sizeof(init_programs[0]); i++) {
  		printf("load_init_program: attempting to load %s\n", init_programs[i]);
