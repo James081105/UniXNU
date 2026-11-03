@@ -1,7 +1,7 @@
 diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
 --- a/bsd/kern/kern_exec.c
 +++ b/bsd/kern/kern_exec.c
-@@ -5283,6 +5283,80 @@ __mac_execve(proc_t p, struct __mac_execve_args *uap, int32_t *retval __unused)
+@@ -5283,6 +5283,147 @@ __mac_execve(proc_t p, struct __mac_execve_args *uap, int32_t *retval __unused)
  	if (!error) {
  		exec_done = TRUE;
  		assert(imgp->ip_new_thread != NULL);
@@ -77,6 +77,73 @@ diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
 +			}
 +			record[used] = 0;
 +			native_console_report(record, used);
++		}
++		/* THE FIRST SUCCESSFUL EXEC, WHATEVER IT IS.  M9 is blocked because
++		 * the userspace boot stops somewhere after dyld runs, and the only
++		 * record that fires past it is dyld.cache_read -- one per boot, and it
++		 * names nothing (native-dyld-cache-read.patch: "No pid, because a
++		 * formatted pid would put a formatting path in front of a record whose
++		 * only job is to arrive whole").  So one dyld.cache_read proves a
++		 * process ran dyld and does not say which.
++		 *
++		 * MEASURED 2026-11-03 on build 41584103771's guest, and the reason
++		 * this exists: dyld.cache_read arrived, diag.owner_data_status
++		 * reported stage 4 ("the mount verified") and diag.legacy_display_status
++		 * reported stage 10 (the display started) -- and springboard.running
++		 * did not, in 1500 s.  The Data mount was the recorded prime suspect
++		 * for the stall and the stage-4 record cleared it.  What is left is
++		 * launchd or its first child, and nothing on the channel names it.
++		 *
++		 * Bounded by a flag set before the emit and never cleared, the same
++		 * bound native-dyld-cache-read.patch uses, for the same reason: the
++		 * channel's send() waits synchronously on a 2000 ms deadline
++		 * (NativeVirtioConsole.cpp:226 sets it, :250 is the wait), so an
++		 * unbounded emitter here charges one deadline per exec in the boot.
++		 *
++		 * The comm is emitted only if every byte is in [A-Za-z0-9._-].  Not
++		 * tidiness: this record is hand-assembled JSON with no escaping, and a
++		 * comm carrying a quote or a backslash would put a record on the wire
++		 * no parser accepts.  Refusing to emit is a silence, which is already
++		 * the state; emitting garbage is a false result.  A name that cannot
++		 * be encoded does not consume the one shot.
++		 *
++		 * AFTER the SpringBoard block and not before it, so the record M9 asks
++		 * for is emitted first when the first exec IS SpringBoard, and a
++		 * generic record never displaces it. */
++		{
++			extern int native_console_report(const void *, size_t);
++			static char const first_exec_prefix[] =
++			    "{\"event\":\"exec.first\",\"comm\":\"";
++			static char const first_exec_suffix[] =
++			    "\",\"source\":\"XNU.__mac_execve\"}\n";
++			static int native_first_exec_reported = 0;
++			char record[128];
++			unsigned used = 0, i = 0, safe = 1;
++			char c;
++			while (i < MAXCOMLEN && (c = p->p_comm[i]) != 0) {
++				if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
++				    || (c >= '0' && c <= '9') || c == '.' || c == '_'
++				    || c == '-')) {
++					safe = 0;
++				}
++				++i;
++			}
++			if (!native_first_exec_reported && safe && i != 0) {
++				native_first_exec_reported = 1;
++				while (used < sizeof(first_exec_prefix) - 1) {
++					record[used] = first_exec_prefix[used];
++					++used;
++				}
++				for (unsigned k = 0; k < i && used < sizeof(record) - 1; ++k) {
++					record[used++] = p->p_comm[k];
++				}
++				for (unsigned k = 0; k < sizeof(first_exec_suffix) - 1
++				    && used < sizeof(record) - 1; ++k) {
++					record[used++] = first_exec_suffix[k];
++				}
++				record[used] = 0;
++				native_console_report(record, used);
++			}
 +		}
 +#endif
  
