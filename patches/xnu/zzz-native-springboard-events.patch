@@ -214,7 +214,7 @@ diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
 diff --git a/bsd/kern/kern_exit.c b/bsd/kern/kern_exit.c
 --- a/bsd/kern/kern_exit.c
 +++ b/bsd/kern/kern_exit.c
-@@ -1502,6 +1502,120 @@
+@@ -1502,6 +1502,162 @@
  	struct uthread *ut;
  	int error = 0;
  	bool proc_exiting = false;
@@ -283,8 +283,9 @@ diff --git a/bsd/kern/kern_exit.c b/bsd/kern/kern_exit.c
 +			static char const exit_prefix[] =
 +			    "{\"event\":\"exit.seen\",\"n\":";
 +			static char const exit_middle[] = ",\"comm\":\"";
++			static char const exit_code_middle[] = "\",\"code\":";
 +			static char const exit_suffix[] =
-+			    "\",\"source\":\"XNU.exit_with_reason\"}\n";
++			    ",\"source\":\"XNU.exit_with_reason\"}\n";
 +			static unsigned native_exit_records = 0;
 +			char record[128];
 +			unsigned used = 0, i = 0, safe = 1;
@@ -322,6 +323,47 @@ diff --git a/bsd/kern/kern_exit.c b/bsd/kern/kern_exit.c
 +				}
 +				for (unsigned k = 0; k < i && used < sizeof(record) - 1; ++k) {
 +					record[used++] = p->p_comm[k];
++				}
++				/* THE EXIT STATUS, because twenty-nine process names with no
++				 * status is a list and not a diagnosis.  MEASURED 2026-11-04
++				 * on build 41690023024: fairplayd.A2 ran THREE times in one
++				 * boot (n=25, 26, 29) and was the last thing that ran before
++				 * the boot stalled.  A daemon that runs three times is usually
++				 * one that failed and was relaunched, and 'usually' is exactly
++				 * what this field is for.
++				 *
++				 * rv is the wait status the kernel is about to hand the
++				 * parent, so it is the kernel's own number and not an
++				 * interpretation of it.  Negative is emitted with a sign: a
++				 * process killed by a signal reports a negative status.
++				 *
++				 * Eleven digits is the worst case for a signed 32-bit int, and
++				 * the record still lands inside the 128-byte buffer: 25 prefix
++				 * + 2 index + 9 + 16 comm + 9 + 11 code + 34 suffix is 106,
++				 * plus the NUL. */
++				for (unsigned k = 0; k < sizeof(exit_code_middle) - 1
++				    && used < sizeof(record) - 1; ++k) {
++					record[used++] = exit_code_middle[k];
++				}
++				{
++					int code = rv;
++					unsigned mag = (code < 0) ? (unsigned)(-code)
++					                     : (unsigned)code;
++					unsigned cdigits = 0;
++					char ctext[12];
++					if (code < 0 && used < sizeof(record) - 1) {
++						record[used++] = '-';
++					}
++					if (!mag) {
++						ctext[cdigits++] = '0';
++					}
++					while (mag && cdigits < sizeof(ctext)) {
++						ctext[cdigits++] = (char)('0' + mag % 10);
++						mag /= 10;
++					}
++					while (cdigits && used < sizeof(record) - 1) {
++						record[used++] = ctext[--cdigits];
++					}
 +				}
 +				for (unsigned k = 0; k < sizeof(exit_suffix) - 1
 +				    && used < sizeof(record) - 1; ++k) {
