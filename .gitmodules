@@ -30,7 +30,7 @@
 	url = https://github.com/UniXNU/NativeMetal.git
 [submodule "drivers/NativeMobileDisplay"]
 	path = drivers/NativeMobileDisplay
-	url = https://github.com/UniXNU/NativeMobileDisplay.git
+	url = https://github.com/James081105/GopFramebuffer.git
 [submodule "drivers/NativeRamBlock"]
 	path = drivers/NativeRamBlock
 	url = https://github.com/UniXNU/NativeRamBlock.git
