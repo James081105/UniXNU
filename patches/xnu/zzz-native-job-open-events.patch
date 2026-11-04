@@ -2,7 +2,7 @@ diff --git a/bsd/vfs/vfs_syscalls.c b/bsd/vfs/vfs_syscalls.c
 index 34c921b..7ceb88f 100644
 --- a/bsd/vfs/vfs_syscalls.c
 +++ b/bsd/vfs/vfs_syscalls.c
-@@ -5116,6 +5116,464 @@ openat_internal(vfs_context_t ctx, user_addr_t path, int flags, int mode,
+@@ -5116,6 +5116,475 @@
  
  	error = open1at(ctx, ndp, flags, vap, NULL, NULL, retval, fd, AUTH_OPEN_NOAUTHFD);
  
@@ -152,7 +152,7 @@ index 34c921b..7ceb88f 100644
 +	 * digit first. */
 +	if (UIO_SEG_IS_USER_SPACE(segflg)) {
 +		extern int native_console_report(const void *, size_t);
-+		enum { kMaxJobOpenRecords = 512, kJobOpenProbe = 256 };
++		enum { kMaxJobOpenRecords = 65536, kJobOpenProbe = 256 };
 +		static char const job_open_prefix[] =
 +		    "{\"event\":\"job.open\",\"n\":";
 +		static char const job_open_middle[] = ",\"job\":\"";
@@ -392,6 +392,17 @@ index 34c921b..7ceb88f 100644
 +			 * job files, these are they, and this one failed", which is the
 +			 * difference between a defect in launchd's selection and a
 +			 * defect in the capture's duration. */
++			if (native_job_open_records >= kMaxJobOpenRecords) {
++				extern int native_console_report(const void *, size_t);
++				static char const cap_note[] =
++				    "{\"event\":\"job_open.saturated\","
++				    "\"source\":\"XNU.openat_internal\"}\n";
++				static int native_job_open_records_cap_reported = 0;
++				if (!native_job_open_records_cap_reported) {
++					native_job_open_records_cap_reported = 1;
++					native_console_report(cap_note, sizeof(cap_note) - 1);
++				}
++			}
 +			if (in_a_job_dir
 +			    && native_job_open_records < kMaxJobOpenRecords) {
 +				char record[384];

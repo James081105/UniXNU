@@ -1,7 +1,7 @@
 diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
 --- a/bsd/kern/kern_exec.c
 +++ b/bsd/kern/kern_exec.c
-@@ -5283,6 +5283,209 @@ __mac_execve(proc_t p, struct __mac_execve_args *uap, int32_t *retval __unused)
+@@ -5283,6 +5283,220 @@
  	if (!error) {
  		exec_done = TRUE;
  		assert(imgp->ip_new_thread != NULL);
@@ -155,7 +155,7 @@ diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
 +		 * boot on a missing literal would have thrown this boot away. */
 +		{
 +			extern int native_console_report(const void *, size_t);
-+			enum { kMaxExecRecords = 64 };
++			enum { kMaxExecRecords = 65536 };
 +			static char const exec_prefix[] =
 +			    "{\"event\":\"exec.seen\",\"n\":";
 +			static char const exec_middle[] = ",\"comm\":\"";
@@ -173,9 +173,20 @@ diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
 +				}
 +				++i;
 +			}
++			if (native_exec_records >= kMaxExecRecords) {
++				extern int native_console_report(const void *, size_t);
++				static char const cap_note[] =
++				    "{\"event\":\"exec.saturated\","
++				    "\"source\":\"XNU.__mac_execve\"}\n";
++				static int native_exec_records_cap_reported = 0;
++				if (!native_exec_records_cap_reported) {
++					native_exec_records_cap_reported = 1;
++					native_console_report(cap_note, sizeof(cap_note) - 1);
++				}
++			}
 +			if (native_exec_records < kMaxExecRecords && safe && i != 0) {
 +				unsigned n, digits = 0;
-+				char text[4];
++				char text[8];
 +				++native_exec_records;
 +				n = native_exec_records;
 +				while (used < sizeof(exec_prefix) - 1) {
@@ -214,7 +225,7 @@ diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
 diff --git a/bsd/kern/kern_exit.c b/bsd/kern/kern_exit.c
 --- a/bsd/kern/kern_exit.c
 +++ b/bsd/kern/kern_exit.c
-@@ -1502,6 +1502,176 @@
+@@ -1502,6 +1502,187 @@
  	struct uthread *ut;
  	int error = 0;
  	bool proc_exiting = false;
@@ -293,7 +304,7 @@ diff --git a/bsd/kern/kern_exit.c b/bsd/kern/kern_exit.c
 +		 */
 +		{
 +			extern int native_console_report(const void *, size_t);
-+			enum { kMaxExitRecords = 512 };
++			enum { kMaxExitRecords = 65536 };
 +			static char const exit_prefix[] =
 +			    "{\"event\":\"exit.seen\",\"n\":";
 +			static char const exit_middle[] = ",\"comm\":\"";
@@ -312,9 +323,20 @@ diff --git a/bsd/kern/kern_exit.c b/bsd/kern/kern_exit.c
 +				}
 +				++i;
 +			}
++			if (native_exit_records >= kMaxExitRecords) {
++				extern int native_console_report(const void *, size_t);
++				static char const cap_note[] =
++				    "{\"event\":\"exit.saturated\","
++				    "\"source\":\"XNU.exit_with_reason\"}\n";
++				static int native_exit_records_cap_reported = 0;
++				if (!native_exit_records_cap_reported) {
++					native_exit_records_cap_reported = 1;
++					native_console_report(cap_note, sizeof(cap_note) - 1);
++				}
++			}
 +			if (native_exit_records < kMaxExitRecords && safe && i != 0) {
 +				unsigned n, digits = 0;
-+				char text[4];
++				char text[8];
 +				++native_exit_records;
 +				n = native_exit_records;
 +				while (used < sizeof(exit_prefix) - 1) {
@@ -394,7 +416,7 @@ diff --git a/bsd/kern/kern_exit.c b/bsd/kern/kern_exit.c
 diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
 --- a/bsd/kern/kern_exec.c
 +++ b/bsd/kern/kern_exec.c
-@@ -4281,6 +4281,132 @@
+@@ -4281,6 +4281,143 @@
  		p = proc_exec_switch_task(current_proc(), p, old_task, new_task, imgp, &inherit);
  		/* proc ref returned */
  		should_release_proc_ref = TRUE;
@@ -470,7 +492,7 @@ diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
 +				native_console_report(record, used);
 +			}
 +			{
-+				enum { kMaxSpawnRecords = 512 };
++				enum { kMaxSpawnRecords = 65536 };
 +				static char const spawn_prefix[] =
 +				    "{\"event\":\"spawn.seen\",\"n\":";
 +				static char const spawn_middle[] = ",\"comm\":\"";
@@ -488,9 +510,20 @@ diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
 +					}
 +					++i;
 +				}
++				if (native_spawn_records >= kMaxSpawnRecords) {
++					extern int native_console_report(const void *, size_t);
++					static char const cap_note[] =
++					    "{\"event\":\"spawn.saturated\","
++					    "\"source\":\"XNU.posix_spawn\"}\n";
++					static int native_spawn_records_cap_reported = 0;
++					if (!native_spawn_records_cap_reported) {
++						native_spawn_records_cap_reported = 1;
++						native_console_report(cap_note, sizeof(cap_note) - 1);
++					}
++				}
 +				if (native_spawn_records < kMaxSpawnRecords && safe && i != 0) {
 +					unsigned n, digits = 0;
-+					char text[4];
++					char text[8];
 +					++native_spawn_records;
 +					n = native_spawn_records;
 +					while (used < sizeof(spawn_prefix) - 1) {
@@ -530,7 +563,7 @@ diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
 diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
 --- a/bsd/kern/kern_exec.c
 +++ b/bsd/kern/kern_exec.c
-@@ -4703,6 +4703,128 @@
+@@ -4703,6 +4703,139 @@
  	}
  
  	if (imgp != NULL) {
@@ -581,7 +614,7 @@ diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
 +		 * fails is the worst case and it is still bounded.
 +		 */
 +		if (error != 0 && !spawn_no_exec) {
-+			enum { kMaxSpawnFailRecords = 64 };
++			enum { kMaxSpawnFailRecords = 65536 };
 +			static char const fail_prefix[] =
 +			    "{\"event\":\"spawn.failed\",\"n\":";
 +			static char const fail_errno_middle[] =
@@ -601,11 +634,22 @@ diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
 +				}
 +				++i;
 +			}
++			if (native_spawn_fail_records >= kMaxSpawnFailRecords) {
++				extern int native_console_report(const void *, size_t);
++				static char const cap_note[] =
++				    "{\"event\":\"spawn_failed.saturated\","
++				    "\"source\":\"XNU.posix_spawn\"}\n";
++				static int native_spawn_fail_records_cap_reported = 0;
++				if (!native_spawn_fail_records_cap_reported) {
++					native_spawn_fail_records_cap_reported = 1;
++					native_console_report(cap_note, sizeof(cap_note) - 1);
++				}
++			}
 +			if (native_spawn_fail_records < kMaxSpawnFailRecords && safe
 +			    && i != 0) {
 +				extern int native_console_report(const void *, size_t);
 +				unsigned n, digits = 0;
-+				char text[4];
++				char text[8];
 +				++native_spawn_fail_records;
 +				n = native_spawn_fail_records;
 +				while (used < sizeof(fail_prefix) - 1) {
