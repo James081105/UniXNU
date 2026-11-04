@@ -1,0 +1,280 @@
+diff --git a/bsd/vfs/vfs_syscalls.c b/bsd/vfs/vfs_syscalls.c
+--- a/bsd/vfs/vfs_syscalls.c
++++ b/bsd/vfs/vfs_syscalls.c
+@@ -5116,6 +5116,276 @@ openat_internal(vfs_context_t ctx, user_addr_t path, int flags, int mode,
+ 
+ 	error = open1at(ctx, ndp, flags, vap, NULL, NULL, retval, fd, AUTH_OPEN_NOAUTHFD);
+ 
++#if defined(XNU_NATIVE_VIRTIO_CONSOLE) && XNU_NATIVE_VIRTIO_CONSOLE
++	/* Report the launchd job files this guest opens, on the channel the
++	 * acceptance gate reads.
++	 *
++	 * WHY THIS EMITTER EXISTS.  Interval 45 read
++	 * /System/Library/LaunchDaemons/com.apple.SpringBoard.plist byte-exact out
++	 * of the guest's root volume (2634 bytes, sha256
++	 * a071265c26b9415973c8bbab8d99fcff6e347d6b7831b9f059903ea63dd835fe) and it
++	 * carries RunAtLoad=TRUE, KeepAlive=TRUE, POSIXSpawnType=App.  So launchd
++	 * was told to start this job at boot and did not.  Splitting all 518
++	 * readable job plists by whether their daemon spawned, the one key that
++	 * separates them perfectly is POSIXSpawnType: seven jobs carry "App", zero
++	 * of the 92 that ran have it, and all seven are in the not-ran group.
++	 * That is a correlation on seven samples, not a mechanism, and the spawn
++	 * stream cannot supply the mechanism.
++	 *
++	 * What it can supply is the other half: whether launchd ever READS the
++	 * file.  "Never opened" and "opened and declined" are different defects
++	 * with different fixes, and this is the only instrument that can tell them
++	 * apart, because the kernel's own dispatcher accepts exactly one message
++	 * type ("type":"install.request") and there is no way to ask launchd
++	 * anything.
++	 *
++	 * THE SITE.  openat_internal() is the single funnel for open() and
++	 * openat(): open_nocancel and openat_nocancel both land here.  It holds
++	 * `user_addr_t path` directly, so the filter is one bounded copyinstr
++	 * rather than a vnode_getpath() on every open in the system -- that
++	 * function walks the parent chain and allocates, and putting it in front
++	 * of every open would cost more than the record is worth.
++	 *
++	 * AFTER open1at(), NOT BEFORE, and that is deliberate: the errno is part of
++	 * the measurement and it is IN the record.  "launchd tried to open
++	 * SpringBoard's plist and got ENOENT" and "launchd tried and succeeded" are
++	 * different findings, and a pre-namei emitter cannot tell them apart.
++	 * `path` is a parameter of this function and stays valid for its whole
++	 * body; `error` is this function's own local, assigned two lines up.
++	 *
++	 * RE-ENTRANCY.  The counters are claimed before the call, not after: the
++	 * record is on its way out, and a path that re-enters this function while
++	 * send() waits must not queue a second one behind it.
++	 *
++	 * SANITISATION.  The job name comes from user memory, so every byte is
++	 * checked against [A-Za-z0-9._-] before it is emitted.  Not tidiness: this
++	 * record is hand-assembled JSON with no escaping, and a name carrying a
++	 * quote or a backslash would put a record on the wire no parser accepts.
++	 * Refusing to emit is a silence, which is already the state; emitting
++	 * garbage is a false result.  The SpringBoard check compares against a
++	 * literal and so cannot be unsafe by construction, which is why the
++	 * targeted record is emitted without a byte scan.
++	 *
++	 * THE SEGFLG GUARD, and what it actually prevents.  Revision 1 of this
++	 * patch described the guard in its comment and did not write it, which a
++	 * review caught.  The stated mechanism was wrong too: copyinstr on a kernel
++	 * address does NOT fault.  copy_validate() (osfmk/arm64/copyio.c:141-147)
++	 * returns EFAULT when the source falls outside [vm_map_min, vm_map_max] of
++	 * the current map, and a kernel address is far above any user map's max;
++	 * is_kernel_to_kernel_copy() (:169-172) returns EFAULT as well because
++	 * copyinstr never sets COPYIO_ALLOW_KERNEL_TO_KERNEL.  So the real
++	 * consequence of an unguarded kernel-space caller is a silently dropped
++	 * record -- which is exactly the failure this patch exists to prevent, and
++	 * the reason the guard is here anyway.  UIO_SEG_IS_USER_SPACE() rather than
++	 * `segflg == UIO_USERSPACE` because that is XNU's own form for this
++	 * decision (bsd/sys/uio.h:130) and it also accepts the 32-bit userspace
++	 * segments.
++	 *
++	 * THE PROBE SIZE, and why 256.  Revision 1 used 96, and the whole emitter
++	 * -- including the targeted SpringBoard check -- sat inside
++	 * `copyinstr(...) == 0`.  A path longer than 95 bytes returns ENAMETOOLONG
++	 * and dropped everything, so the single most valuable record in the patch
++	 * sat behind the same bound as the noise.  256 bytes of stack is free on
++	 * this path (openat_internal already kallocs a struct nameidata) and
++	 * removes the class of failure.
++	 *
++	 * NO snprintf, and static strings only, for the reason the mount emitter
++	 * gives: a formatted value is a value that can disagree with what happened.
++	 * The record number and the errno are assembled by hand, most significant
++	 * digit first. */
++	if (UIO_SEG_IS_USER_SPACE(segflg)) {
++		extern int native_console_report(const void *, size_t);
++		enum { kMaxJobOpenRecords = 512, kJobOpenProbe = 256 };
++		static char const job_open_prefix[] =
++		    "{\"event\":\"job.open\",\"n\":";
++		static char const job_open_middle[] = ",\"job\":\"";
++		static char const job_open_err[] = "\",\"err\":";
++		static char const job_open_suffix[] =
++		    ",\"source\":\"XNU.openat_internal\"}" "\n";
++		static char const springboard_prefix[] =
++		    "{\"event\":\"job.springboard_open\",\"err\":";
++		static char const springboard_suffix[] =
++		    ",\"source\":\"XNU.openat_internal\"}" "\n";
++		static char const springboard_name[] = "com.apple.SpringBoard.plist";
++		/* Both arms of the mount.  offline-owner-systemos-mount.patch:102-116
++		 * mounts the owner cache at "/" when XNU_OWNER_UNION_SYSTEMOS is 1
++		 * and at "/private/preboot" when it is 0, and
++		 * build-xnu-4k-baseline.sh:438 defaults the switch to 0.  Interval
++		 * 42's measured system.mount record says "mountpoint":"/", so the
++		 * union arm is the live one on the build that produced it -- but a
++		 * capture that shows zero job.open records must not be ambiguous
++		 * between "launchd opened no job files" and "the prefix list was
++		 * wrong", so both arms are matched.  Six strings, and the comment in
++		 * the mount patch names both, so the code has to as well. */
++		static char const *const job_dirs[] = {
++			"/System/Library/LaunchDaemons/",
++			"/System/Library/LaunchAgents/",
++			"/System/Library/NanoLaunchDaemons/",
++			"/private/preboot/System/Library/LaunchDaemons/",
++			"/private/preboot/System/Library/LaunchAgents/",
++			"/private/preboot/System/Library/NanoLaunchDaemons/",
++		};
++		static unsigned native_job_open_records = 0;
++		static unsigned native_springboard_reported = 0;
++		char probe[kJobOpenProbe];
++		char const *base = probe;
++		vm_size_t copied = 0;
++		int in_a_job_dir = 0;
++		/* XNU's BSD layer returns positive errno.  A negative would render
++		 * as a large unsigned here, which is a distinguishable "this is not
++		 * an errno" rather than a wrong errno -- and clamping it to zero
++		 * would silently turn "some other failure" into "no failure". */
++		unsigned err_no = (unsigned)error;
++
++		/* Whatever copyinstr returns, terminate.  ENAMETOOLONG leaves the
++		 * buffer full and unterminated, and a comparison over an
++		 * unterminated buffer reads past its end. */
++		probe[sizeof(probe) - 1] = 0;
++		if (copyinstr(path, probe, sizeof(probe), &copied) == 0) {
++			/* The last path component.  Only meaningful when the whole
++			 * path fitted, which the == 0 above establishes. */
++			for (int i = 0; probe[i]; ++i) {
++				if (probe[i] == '/') {
++					base = &probe[i + 1];
++				}
++			}
++
++			/* Is this under one of the job directories?  Matched exactly
++			 * rather than by substring, because a substring match would
++			 * also fire on a path that merely mentions the directory name,
++			 * and a record that fires on the wrong path is worse than no
++			 * record. */
++			for (unsigned d = 0;
++			    d < sizeof(job_dirs) / sizeof(job_dirs[0]); ++d) {
++				char const *lit = job_dirs[d];
++				unsigned k = 0;
++				while (lit[k] && probe[k] == lit[k]) {
++					++k;
++				}
++				if (lit[k] == 0) {
++					in_a_job_dir = 1;
++				}
++			}
++
++			/* THE TARGETED RECORD.  Whatever the directory, whatever the
++			 * prefix, relative or absolute: if the thing being opened IS
++			 * SpringBoard's job file then that is the answer, and it is
++			 * checked before the prefix test so a path outside the six
++			 * watched directories still reports.  Bounded to one, because
++			 * the second and later opens of the same file add nothing to
++			 * "did it ever open this". */
++			if (!native_springboard_reported) {
++				unsigned k = 0;
++				while (springboard_name[k]
++				    && base[k] == springboard_name[k]) {
++					++k;
++				}
++				if (springboard_name[k] == 0 && base[k] == 0) {
++					char record[192];
++					unsigned used = 0, v = err_no;
++					char digits[12];
++					int nd = 0;
++					native_springboard_reported = 1;
++					for (unsigned p = 0; springboard_prefix[p]
++					    && used < sizeof(record) - 1; ++p) {
++						record[used++] = springboard_prefix[p];
++					}
++					do {
++						if (nd < (int)sizeof(digits)) {
++							digits[nd++] = (char)('0' + (v % 10));
++						}
++						v /= 10;
++					} while (v);
++					while (nd && used < sizeof(record) - 1) {
++						record[used++] = digits[--nd];
++					}
++					for (unsigned p = 0; springboard_suffix[p]
++					    && used < sizeof(record) - 1; ++p) {
++						record[used++] = springboard_suffix[p];
++					}
++					record[used] = 0;
++					native_console_report(record, used);
++				}
++			}
++
++			/* THE GENERAL RECORD.  Any open under one of the job
++			 * directories, carrying the job's name and the errno.  This is
++			 * what turns "SpringBoard did not spawn" into "launchd opened N
++			 * job files, these are they, and this one failed", which is the
++			 * difference between a defect in launchd's selection and a
++			 * defect in the capture's duration. */
++			if (in_a_job_dir
++			    && native_job_open_records < kMaxJobOpenRecords) {
++				char record[256];
++				unsigned used = 0, blen = 0, n;
++				int safe = base[0] != 0;
++				char digits[12];
++				int nd = 0;
++
++				for (unsigned i = 0; base[i]; ++i) {
++					char c = base[i];
++					if (!((c >= 'a' && c <= 'z')
++					    || (c >= 'A' && c <= 'Z')
++					    || (c >= '0' && c <= '9')
++					    || c == '.' || c == '_' || c == '-')) {
++						safe = 0;
++						break;
++					}
++					++blen;
++				}
++				if (safe && blen > 0 && blen < 100) {
++					unsigned v;
++					++native_job_open_records;
++					n = native_job_open_records;
++					for (unsigned p = 0; job_open_prefix[p]
++					    && used < sizeof(record) - 1; ++p) {
++						record[used++] = job_open_prefix[p];
++					}
++					v = n;
++					do {
++						if (nd < (int)sizeof(digits)) {
++							digits[nd++] = (char)('0' + (v % 10));
++						}
++						v /= 10;
++					} while (v);
++					while (nd && used < sizeof(record) - 1) {
++						record[used++] = digits[--nd];
++					}
++					for (unsigned p = 0; job_open_middle[p]
++					    && used < sizeof(record) - 1; ++p) {
++						record[used++] = job_open_middle[p];
++					}
++					for (unsigned i = 0; i < blen
++					    && used < sizeof(record) - 1; ++i) {
++						record[used++] = base[i];
++					}
++					for (unsigned p = 0; job_open_err[p]
++					    && used < sizeof(record) - 1; ++p) {
++						record[used++] = job_open_err[p];
++					}
++					v = err_no;
++					nd = 0;
++					do {
++						if (nd < (int)sizeof(digits)) {
++							digits[nd++] = (char)('0' + (v % 10));
++						}
++						v /= 10;
++					} while (v);
++					while (nd && used < sizeof(record) - 1) {
++						record[used++] = digits[--nd];
++					}
++					for (unsigned p = 0; job_open_suffix[p]
++					    && used < sizeof(record) - 1; ++p) {
++						record[used++] = job_open_suffix[p];
++					}
++					record[used] = 0;
++					native_console_report(record, used);
++				}
++			}
++		}
++	}
++#endif /* XNU_NATIVE_VIRTIO_CONSOLE */
++
+ 	kfree_type(typeof(*__open_data), __open_data);
+ 
+ 	return error;

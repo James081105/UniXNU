@@ -495,6 +495,32 @@ EXTRA_MAKE_ARGS+=("vm_unix.o_CFLAGS_ADD=-DXNU_OWNER_CACHE_CARRIER=$OWNER_CACHE_C
 # existing one: make takes the LAST <obj>_CFLAGS_ADD, so a second vm_unix.o entry
 # would silently discard the owner-cache-carrier one above.
 EXTRA_MAKE_ARGS+=("kern_exit.o_CFLAGS_ADD=-DXNU_NATIVE_VIRTIO_CONSOLE=$NATIVE_VIRTIO_CONSOLE")
+# vfs_syscalls.o carries the open-path half of the job-open record, and it needs
+# the same console macro kern_exit.o gets -- otherwise the emitter is compiled out
+# and the boot is silent about which launchd job files the guest ever opens.
+# zzz-native-job-open-events.patch is what puts it there, and the site is
+# openat_internal(), the single funnel for open() and openat().
+#
+# A NEW object, not a second entry for an existing one: make takes the LAST
+# <obj>_CFLAGS_ADD, so a second kern_exit.o entry would silently discard the one
+# above, and a second vm_unix.o entry would silently discard the
+# owner-cache-carrier one further up.
+#
+# The stamp is NOT optional and the reason is measured rather than argued.  The
+# exit emitter sat its bound at 64 in interval 42 and the boot then reported 64
+# exit records against 155 spawn records in the same file; and the spawn emitter
+# before it lost 91 of 155 spawns to the same shape of defect.  Both were
+# invisible because nothing distinguished "compiled and not reached" from "not
+# compiled".  A stale vfs_syscalls.o left behind by a cache restore would
+# reproduce exactly that failure, so the object is removed whenever the console
+# switch changes, and the object path is bsd/DEVELOPMENT/ for the same reason
+# kern_exec.o's and vm_unix.o's are.
+EXTRA_MAKE_ARGS+=("vfs_syscalls.o_CFLAGS_ADD=-DXNU_NATIVE_VIRTIO_CONSOLE=$NATIVE_VIRTIO_CONSOLE")
+JOB_OPEN_STAMP=$ROOT/build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/.job-open-console-mode
+if [ "$(cat "$JOB_OPEN_STAMP" 2>/dev/null || echo unset)" != "$NATIVE_VIRTIO_CONSOLE" ]; then
+  rm -f "$ROOT/build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/bsd/DEVELOPMENT/vfs_syscalls.o"
+  printf '%s\n' "$NATIVE_VIRTIO_CONSOLE" > "$JOB_OPEN_STAMP"
+fi
 OWNER_CARRIER_STAMP=$ROOT/build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/.owner-cache-carrier-mode
 if [ "$(cat "$OWNER_CARRIER_STAMP" 2>/dev/null || echo 0:0:0)" != "$OWNER_CACHE_CARRIER:$OWNER_CACHE_CARRIER_WRONG_UUID:$NATIVE_VIRTIO_CONSOLE" ]; then
   rm -f "$ROOT/build/xnu/ios-obj/DEVELOPMENT_ARM64_BCM2837/bsd/DEVELOPMENT/vm_unix.o"
