@@ -1,7 +1,8 @@
 diff --git a/bsd/vfs/vfs_syscalls.c b/bsd/vfs/vfs_syscalls.c
+index 34c921b..def1edb 100644
 --- a/bsd/vfs/vfs_syscalls.c
 +++ b/bsd/vfs/vfs_syscalls.c
-@@ -5116,6 +5116,276 @@ openat_internal(vfs_context_t ctx, user_addr_t path, int flags, int mode,
+@@ -5116,6 +5116,419 @@ openat_internal(vfs_context_t ctx, user_addr_t path, int flags, int mode,
  
  	error = open1at(ctx, ndp, flags, vap, NULL, NULL, retval, fd, AUTH_OPEN_NOAUTHFD);
  
@@ -14,14 +15,60 @@ diff --git a/bsd/vfs/vfs_syscalls.c b/bsd/vfs/vfs_syscalls.c
 +	 * of the guest's root volume (2634 bytes, sha256
 +	 * a071265c26b9415973c8bbab8d99fcff6e347d6b7831b9f059903ea63dd835fe) and it
 +	 * carries RunAtLoad=TRUE, KeepAlive=TRUE, POSIXSpawnType=App.  So launchd
-+	 * was told to start this job at boot and did not.  Splitting all 518
-+	 * readable job plists by whether their daemon spawned, the one key that
-+	 * separates them perfectly is POSIXSpawnType: seven jobs carry "App", zero
-+	 * of the 92 that ran have it, and all seven are in the not-ran group.
-+	 * That is a correlation on seven samples, not a mechanism, and the spawn
-+	 * stream cannot supply the mechanism.
++	 * was told to start this job at boot and did not.
++	 *
++	 * REVISION 2 CORRECTS REVISION 1's ACCOUNT OF THE SEPARATOR, because
++	 * revision 1's header is now known to be wrong in a way that matters.
++	 * Revision 1 said POSIXSpawnType=App was "the one key that separates them
++	 * perfectly": seven jobs carry it, zero of the 92 that ran have it.
++	 * Interval 47's live boot then produced 105 spawns, and the table behind
++	 * them says
++	 *
++	 *     Standard (absent)  29 ran / 207 not-ran
++	 *     Adaptive           28 ran / 165 not-ran
++	 *     Interactive        35 ran /  41 not-ran
++	 *     App                 0 ran /   7 not-ran
++	 *     Background          0 ran /   5 not-ran
++	 *
++	 * so App is NOT special.  App and Background are BOTH zero-for-92, and
++	 * those are the two SESSION-SCOPED spawn types while the three that
++	 * launched are boot-scoped.  The question is therefore not "why does
++	 * launchd decline App" but "what does a session-scoped launch require that
++	 * this guest never provides" -- and SpringBoard, the job that would
++	 * establish the session, is itself session-scoped.  That is a correlation
++	 * over 12 jobs with a mechanism that fits, not a mechanism, and this
++	 * emitter exists to supply the half of it the spawn stream cannot.
++	 *
++	 * The other candidate was refuted with a live control.  SpringBoard's
++	 * LimitLoadFromHardware={"osenvironment":["diagnostics"]} is carried by
++	 * exactly one other job, com.apple.logd.plist, which SPAWNED in the same
++	 * boot (spawn.seen n=11) while SpringBoard did not.  A key that produces
++	 * both outcomes in one run is not a cause.
 +	 *
 +	 * What it can supply is the other half: whether launchd ever READS the
++	 * REVISION 3 RECORDS WHAT REVISION 2 MEASURED AND WHAT IT REFUTED.
++	 * Revision 2 widened the general record's gate to
++	 * `in_a_job_dir || launchd_is_the_caller` and added abs and comm
++	 * fields, on one sample: three job.open records against 105 spawns
++	 * at 08:50.  At 09:15 the same log carried 154 records against 222
++	 * spawns, errno {0: 152, 2: 2}, so the general record was measuring
++	 * opens correctly all along and the widening comes out.  152 of 154
++	 * opens matched an absolute prefix, which refutes the
++	 * relative-openat hypothesis directly rather than by absence of
++	 * evidence.
++	 *
++	 * What the 154 records DID find is the reason this revision exists,
++	 * and it contradicts the path named in the first paragraph above:
++	 * com.apple.SpringBoard.plist is NOT among them, while the targeted
++	 * basename record fired with err:0.  The general record needs the
++	 * full path to start with one of six job directories, so launchd
++	 * opened SpringBoard's job file successfully from a directory that
++	 * is none of the six.  Either the path above is not the path
++	 * launchd uses, or the union mount presents it under a spelling the
++	 * six literals do not cover.  Both are answerable, and the field
++	 * that answers them is now emitted: the targeted record carries the
++	 * full path it was handed, which is the one thing revision 2 had in
++	 * its probe buffer and threw away.
 +	 * file.  "Never opened" and "opened and declined" are different defects
 +	 * with different fixes, and this is the only instrument that can tell them
 +	 * apart, because the kernel's own dispatcher accepts exactly one message
@@ -95,6 +142,33 @@ diff --git a/bsd/vfs/vfs_syscalls.c b/bsd/vfs/vfs_syscalls.c
 +		    "{\"event\":\"job.springboard_open\",\"err\":";
 +		static char const springboard_suffix[] =
 +		    ",\"source\":\"XNU.openat_internal\"}" "\n";
++		/* REVISION 3.  THE PATH, and why it is in the TARGETED
++		 * record and not the general one.  Measured 2026-11-04
++		 * on build 41788097516: 154 general job.open records,
++		 * and com.apple.SpringBoard.plist is NOT among them,
++		 * while this targeted record fired with err:0.  The
++		 * general record requires the full path to begin with
++		 * one of six job directories, so the only consistent
++		 * reading is that launchd opened SpringBoard's job file
++		 * from a directory that is none of the six.  That is
++		 * the first hard evidence for the two-volume split the
++		 * volume scan predicted, and the field that settles
++		 * WHERE the file lives.
++		 *
++		 * It goes here rather than in the general record
++		 * because this record is bounded to one emission and
++		 * the general one is not: 154 records x a 256-byte
++		 * path would be 39 KB of channel traffic to answer a
++		 * question one path answers.
++		 *
++		 * The bytes are scanned against [A-Za-z0-9._-/] rather
++		 * than the general record's [A-Za-z0-9._-], because a
++		 * path without '/' is not a path.  A byte outside that
++		 * set still suppresses the path and keeps the errno,
++		 * which is the same trade the general record makes: a
++		 * silence is already the state, a malformed record is
++		 * not. */
++		static char const springboard_path[] = ",\"path\":\"";
 +		static char const springboard_name[] = "com.apple.SpringBoard.plist";
 +		/* Both arms of the mount.  offline-owner-systemos-mount.patch:102-116
 +		 * mounts the owner cache at "/" when XNU_OWNER_UNION_SYSTEMOS is 1
@@ -125,6 +199,9 @@ diff --git a/bsd/vfs/vfs_syscalls.c b/bsd/vfs/vfs_syscalls.c
 +		 * an errno" rather than a wrong errno -- and clamping it to zero
 +		 * would silently turn "some other failure" into "no failure". */
 +		unsigned err_no = (unsigned)error;
++		/* Revision 2 declared launchd_is_the_caller here for the
++		 * comm arm.  Revision 3 removed the arm; see the note
++		 * above the targeted record. */
 +
 +		/* Whatever copyinstr returns, terminate.  ENAMETOOLONG leaves the
 +		 * buffer full and unterminated, and a comparison over an
@@ -156,6 +233,36 @@ diff --git a/bsd/vfs/vfs_syscalls.c b/bsd/vfs/vfs_syscalls.c
 +				}
 +			}
 +
++			/* REVISION 3.  WHAT REVISION 2 GOT WRONG, and what it
++			 * got right.  Revision 2 widened this gate to
++			 * `in_a_job_dir || launchd_is_the_caller` and scanned
++			 * the caller's comm, on one sample: 08:50 on build
++			 * 41788097516 showed three job.open records against
++			 * 105 spawns, and that was read as the prefix filter
++			 * dropping relative opens.
++			 *
++			 * At 09:15 the same log carried 154 records against
++			 * 222 spawns, errno {0: 152, 2: 2}.  The general record
++			 * was measuring opens correctly all along; the boot had
++			 * not reached bulk job discovery yet.  152 of 154 opens
++			 * matched an absolute prefix, which refutes the
++			 * relative-openat hypothesis directly.  So the comm arm,
++			 * the widened gate and this revision's premise all come
++			 * out, and the gate is `in_a_job_dir` again.
++			 *
++			 * The 154 records did find something, and it is why
++			 * this revision exists: com.apple.SpringBoard.plist is
++			 * NOT among them, while the targeted basename record
++			 * below fired with err:0.  The general record needs the
++			 * full path to start with one of six job directories,
++			 * so SpringBoard's job file was opened successfully from
++			 * a directory that is none of the six.  The answer was
++			 * already in the probe buffer; it was not printed.
++			 *
++			 * This is the fifth time this project measured too early
++			 * and read the result as a defect in the instrument.  A
++			 * low count on a live boot is a statement about the
++			 * boot's progress until proven otherwise. */
 +			/* THE TARGETED RECORD.  Whatever the directory, whatever the
 +			 * prefix, relative or absolute: if the thing being opened IS
 +			 * SpringBoard's job file then that is the answer, and it is
@@ -170,7 +277,14 @@ diff --git a/bsd/vfs/vfs_syscalls.c b/bsd/vfs/vfs_syscalls.c
 +					++k;
 +				}
 +				if (springboard_name[k] == 0 && base[k] == 0) {
-+					char record[192];
++					/* 192 held the errno and two static strings with room
++					 * to spare.  A 256-byte path does not fit in that,
++					 * and a truncated path is worse than none -- it would
++					 * name a directory that is not the one the file came
++					 * from.  512 leaves the whole probe buffer plus both
++					 * strings plus the digits, and this is one record per
++					 * boot. */
++					char record[512];
 +					unsigned used = 0, v = err_no;
 +					char digits[12];
 +					int nd = 0;
@@ -187,6 +301,36 @@ diff --git a/bsd/vfs/vfs_syscalls.c b/bsd/vfs/vfs_syscalls.c
 +					} while (v);
 +					while (nd && used < sizeof(record) - 1) {
 +						record[used++] = digits[--nd];
++					}
++					/* The full path this caller was handed, byte-scanned.
++					 * If a byte is outside the safe set the path is
++					 * dropped and the record still carries the errno,
++					 * which is the part that answers "did launchd open
++					 * it".  `probe` is NUL-terminated unconditionally
++					 * above, so this loop is bounded. */
++					int path_safe = 1;
++					unsigned plen = 0;
++					for (unsigned i = 0; probe[i]; ++i) {
++						char c = probe[i];
++						if (!((c >= 'a' && c <= 'z')
++							|| (c >= 'A' && c <= 'Z')
++							|| (c >= '0' && c <= '9')
++							|| c == '.' || c == '_' || c == '-' || c == '/')) {
++								path_safe = 0;
++								break;
++							}
++						++plen;
++					}
++					if (path_safe && plen > 0) {
++						for (unsigned p = 0; springboard_path[p]
++							&& used < sizeof(record) - 1; ++p) {
++							record[used++] = springboard_path[p];
++						}
++						for (unsigned i = 0; i < plen
++							&& used < sizeof(record) - 1; ++i) {
++							record[used++] = probe[i];
++						}
++						record[used++] = '"';
 +					}
 +					for (unsigned p = 0; springboard_suffix[p]
 +					    && used < sizeof(record) - 1; ++p) {
@@ -205,7 +349,7 @@ diff --git a/bsd/vfs/vfs_syscalls.c b/bsd/vfs/vfs_syscalls.c
 +			 * defect in the capture's duration. */
 +			if (in_a_job_dir
 +			    && native_job_open_records < kMaxJobOpenRecords) {
-+				char record[256];
++				char record[384];
 +				unsigned used = 0, blen = 0, n;
 +				int safe = base[0] != 0;
 +				char digits[12];
