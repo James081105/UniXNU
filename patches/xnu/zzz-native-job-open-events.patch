@@ -1,8 +1,8 @@
 diff --git a/bsd/vfs/vfs_syscalls.c b/bsd/vfs/vfs_syscalls.c
-index 34c921b..def1edb 100644
+index 34c921b..7ceb88f 100644
 --- a/bsd/vfs/vfs_syscalls.c
 +++ b/bsd/vfs/vfs_syscalls.c
-@@ -5116,6 +5116,419 @@ openat_internal(vfs_context_t ctx, user_addr_t path, int flags, int mode,
+@@ -5116,6 +5116,464 @@ openat_internal(vfs_context_t ctx, user_addr_t path, int flags, int mode,
  
  	error = open1at(ctx, ndp, flags, vap, NULL, NULL, retval, fd, AUTH_OPEN_NOAUTHFD);
  
@@ -46,29 +46,50 @@ index 34c921b..def1edb 100644
 +	 * both outcomes in one run is not a cause.
 +	 *
 +	 * What it can supply is the other half: whether launchd ever READS the
-+	 * REVISION 3 RECORDS WHAT REVISION 2 MEASURED AND WHAT IT REFUTED.
-+	 * Revision 2 widened the general record's gate to
-+	 * `in_a_job_dir || launchd_is_the_caller` and added abs and comm
-+	 * fields, on one sample: three job.open records against 105 spawns
-+	 * at 08:50.  At 09:15 the same log carried 154 records against 222
-+	 * spawns, errno {0: 152, 2: 2}, so the general record was measuring
-+	 * opens correctly all along and the widening comes out.  152 of 154
-+	 * opens matched an absolute prefix, which refutes the
-+	 * relative-openat hypothesis directly rather than by absence of
-+	 * evidence.
++	 * REVISION 3 RECORDS WHAT REVISION 2 MEASURED, AND WHAT THE CORRECTION
++	 * OF THAT MEASUREMENT THEN GOT WRONG.
 +	 *
-+	 * What the 154 records DID find is the reason this revision exists,
-+	 * and it contradicts the path named in the first paragraph above:
-+	 * com.apple.SpringBoard.plist is NOT among them, while the targeted
-+	 * basename record fired with err:0.  The general record needs the
-+	 * full path to start with one of six job directories, so launchd
-+	 * opened SpringBoard's job file successfully from a directory that
-+	 * is none of the six.  Either the path above is not the path
-+	 * launchd uses, or the union mount presents it under a spelling the
-+	 * six literals do not cover.  Both are answerable, and the field
-+	 * that answers them is now emitted: the targeted record carries the
-+	 * full path it was handed, which is the one thing revision 2 had in
-+	 * its probe buffer and threw away.
++	 * Revision 2 widened the general record's gate to
++	 * `in_a_job_dir || launchd_is_the_caller` and added abs and comm fields, on
++	 * one sample: three job.open records against 105 spawns at 08:50.  At 09:15
++	 * the same log carried 154 records against 222 spawns, errno {0: 152, 2: 2},
++	 * so the general record was measuring opens correctly all along and the
++	 * widening comes out.  152 of 154 opens matched an absolute prefix, which
++	 * refutes the relative-openat hypothesis directly rather than by absence of
++	 * evidence.  THAT PART STANDS and is not being re-litigated here.
++	 *
++	 * What does not stand is the conclusion drawn from the 154, which was that
++	 * com.apple.SpringBoard.plist is not among them.  The same log, read at 453
++	 * records, carries it as general record n=239 with err:0 -- 585 lines after
++	 * the first job.open record, at spawn n=236.  So there are TWO opens and
++	 * this emitter's two records saw different ones: the targeted basename
++	 * record fired on the FIRST, at capture line 78, about 35 opens into job
++	 * discovery and between spawn n=17 and n=21, from a path matching none of
++	 * the six; the general record fired on the SECOND, from a path that did.
++	 * The targeted record is bounded to one emission and was spent by then,
++	 * which is why only one of the two records names the second open.
++	 *
++	 * Eight job files are opened more than once in that boot and six show the
++	 * same early-plus-late shape (jetsamproperties.J120 n=2,3,27;
++	 * ftp-proxy-embedded n=4,5,253; bluetoothd n=7,214; locationd n=9,293;
++	 * iomfb_fdr_loader n=10,347; triald n=59,203), so a double open is a
++	 * pattern, not an anomaly.  What distinguishes SpringBoard is that its EARLY
++	 * open is absent from the general list while all six of those early opens
++	 * are present.  That one fact is what this field names, and it was invisible
++	 * at 154 records.
++	 *
++	 * What is already settled by both records carrying err:0: the file is there,
++	 * launchd can read it, and it reads it twice.  442 spawns and 158 distinct
++	 * comms later there is still no SpringBoard-shaped comm.  The defect is
++	 * downstream of the open -- in what launchd decides about a job it has read
++	 * -- and not in the file's availability.  The lead that survives every
++	 * refutation is that POSIXSpawnType=App and Background are the two
++	 * session-scoped spawn types and are 0-for-92 between them, while the three
++	 * types that launched are boot-scoped.
++	 *
++	 * This is the sixth time this project measured too early and read the result
++	 * as a fact about the guest.  The proof is a longer capture, not a better
++	 * argument.
 +	 * file.  "Never opened" and "opened and declined" are different defects
 +	 * with different fixes, and this is the only instrument that can tell them
 +	 * apart, because the kernel's own dispatcher accepts exactly one message
@@ -233,36 +254,60 @@ index 34c921b..def1edb 100644
 +				}
 +			}
 +
-+			/* REVISION 3.  WHAT REVISION 2 GOT WRONG, and what it
-+			 * got right.  Revision 2 widened this gate to
-+			 * `in_a_job_dir || launchd_is_the_caller` and scanned
-+			 * the caller's comm, on one sample: 08:50 on build
-+			 * 41788097516 showed three job.open records against
-+			 * 105 spawns, and that was read as the prefix filter
-+			 * dropping relative opens.
++			/* REVISION 3.  WHAT REVISION 2 GOT WRONG, and what the
++			 * correction of that got wrong in turn.
 +			 *
-+			 * At 09:15 the same log carried 154 records against
-+			 * 222 spawns, errno {0: 152, 2: 2}.  The general record
-+			 * was measuring opens correctly all along; the boot had
-+			 * not reached bulk job discovery yet.  152 of 154 opens
-+			 * matched an absolute prefix, which refutes the
-+			 * relative-openat hypothesis directly.  So the comm arm,
-+			 * the widened gate and this revision's premise all come
-+			 * out, and the gate is `in_a_job_dir` again.
++			 * Revision 2 widened this gate to
++			 * `in_a_job_dir || launchd_is_the_caller` and scanned the
++			 * caller's comm, on one sample: 08:50 on build 41788097516
++			 * showed three job.open records against 105 spawns, read as
++			 * the prefix filter dropping relative opens.  At 09:15 the
++			 * same log carried 154 records against 222 spawns, errno
++			 * {0: 152, 2: 2}.  The general record was measuring opens
++			 * correctly all along; the boot had not reached bulk job
++			 * discovery yet.  152 of 154 opens matched an absolute
++			 * prefix, which refutes the relative-openat hypothesis
++			 * directly.  So the comm arm, the widened gate and revision
++			 * 2's premise all come out, and the gate is `in_a_job_dir`
++			 * again.  THAT PART STANDS.
 +			 *
-+			 * The 154 records did find something, and it is why
-+			 * this revision exists: com.apple.SpringBoard.plist is
-+			 * NOT among them, while the targeted basename record
-+			 * below fired with err:0.  The general record needs the
-+			 * full path to start with one of six job directories,
-+			 * so SpringBoard's job file was opened successfully from
-+			 * a directory that is none of the six.  The answer was
-+			 * already in the probe buffer; it was not printed.
++			 * What does not stand is the conclusion drawn from the 154,
++			 * which was that com.apple.SpringBoard.plist is not among
++			 * them.  The same log, read at 453 records, carries it as
++			 * general record n=239 with err:0 -- 585 lines after the
++			 * first job.open record, at spawn n=236.  So there are TWO
++			 * opens, and this emitter's two records saw different ones:
++			 * the targeted basename record fired on the FIRST, at line
++			 * 78 of the capture, about 35 opens into job discovery and
++			 * between spawn n=17 and n=21, from a path that matched none
++			 * of the six; the general record fired on the SECOND, from
++			 * a path that did.  The targeted record is bounded to one
++			 * emission and was spent by then, which is why only one of
++			 * the two records names the second open.
 +			 *
-+			 * This is the fifth time this project measured too early
-+			 * and read the result as a defect in the instrument.  A
-+			 * low count on a live boot is a statement about the
-+			 * boot's progress until proven otherwise. */
++			 * Eight job files are opened more than once in that boot and
++			 * six of them show the same early-plus-late shape
++			 * (jetsamproperties.J120 n=2,3,27; ftp-proxy-embedded
++			 * n=4,5,253; bluetoothd n=7,214; locationd n=9,293;
++			 * iomfb_fdr_loader n=10,347; triald n=59,203), so a double
++			 * open is a pattern and not an anomaly.  What distinguishes
++			 * SpringBoard is that its EARLY open is absent from the
++			 * general list while all six of those early opens are
++			 * present.  That one fact is what this field names, and it
++			 * was invisible at 154 records.
++			 *
++			 * What is already settled by both records being err:0: the
++			 * file is there, launchd can read it, and it reads it twice.
++			 * 442 spawns and 158 distinct comms later there is still no
++			 * SpringBoard-shaped comm.  The defect is downstream of the
++			 * open -- in what launchd decides about a job it has read --
++			 * and not in the file's availability.
++			 *
++			 * This is the sixth time this project measured too early and
++			 * read the result as a fact about the guest.  A low count on
++			 * a live boot is a statement about the boot's progress
++			 * until proven otherwise, and the proof is a longer capture,
++			 * not a better argument. */
 +			/* THE TARGETED RECORD.  Whatever the directory, whatever the
 +			 * prefix, relative or absolute: if the thing being opened IS
 +			 * SpringBoard's job file then that is the answer, and it is
