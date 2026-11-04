@@ -214,7 +214,7 @@ diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
 diff --git a/bsd/kern/kern_exit.c b/bsd/kern/kern_exit.c
 --- a/bsd/kern/kern_exit.c
 +++ b/bsd/kern/kern_exit.c
-@@ -1502,6 +1502,162 @@
+@@ -1502,6 +1502,176 @@
  	struct uthread *ut;
  	int error = 0;
  	bool proc_exiting = false;
@@ -252,6 +252,20 @@ diff --git a/bsd/kern/kern_exit.c b/bsd/kern/kern_exit.c
 +		 * measured pace is one record per eight seconds of guest time, which
 +		 * is the boot's own and not the transport's.
 +		 *
++		 * AND SIXTY-FOUR SATURATED IN INTERVAL 42.  exit.seen
++		 * stopped at exactly n=64 and the 64th record is
++		 * `exit.seen n=64 comm='bluetoothd' code=256`, while
++		 * bluetoothd kept exiting afterwards -- it spawned 35 times in
++		 * the whole boot and is the last record in the capture.  Every
++		 * exit after the 64th is therefore invisible, which is why
++		 * exit.seen reports 64 while spawn.seen reports 155 in the same
++		 * file.  This is the same defect that hid 91 of interval 41's 155
++		 * spawns on the spawn emitter: that bound went 64 -> 512
++		 * afterwards and this one was left behind.  Five hundred and twelve
++		 * now, which at interval 42's pace of one exit per eight seconds
++		 * of guest time is a budget of over an hour of guest time, and the
++		 * bound costs four bytes of static data.
++		 *
 +		 * HERE AND NOT IN exit1(): exit1() is a three-line wrapper around
 +		 * exit1_internal(), which is itself a wrapper.  exit_with_reason() is
 +		 * the body they all reach, and p->p_comm is still valid at its top --
@@ -279,7 +293,7 @@ diff --git a/bsd/kern/kern_exit.c b/bsd/kern/kern_exit.c
 +		 */
 +		{
 +			extern int native_console_report(const void *, size_t);
-+			enum { kMaxExitRecords = 64 };
++			enum { kMaxExitRecords = 512 };
 +			static char const exit_prefix[] =
 +			    "{\"event\":\"exit.seen\",\"n\":";
 +			static char const exit_middle[] = ",\"comm\":\"";
