@@ -513,3 +513,135 @@ diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
  	}
  
  	if (error == 0) {
+diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -4703,6 +4703,128 @@
+ 	}
+ 
+ 	if (imgp != NULL) {
++#if defined(XNU_OWNER_CACHE_MOUNT) && XNU_OWNER_CACHE_MOUNT
++		/* THE FAILURE PATH.  Interval 41 closed every doubt about
++		 * springboard.running's absence and turned it into a guest fact:
++		 * 64 daemons spawn with correct names, both exec paths emit, the
++		 * bound does not saturate, and the capture stops on quiet rather
++		 * than on a clock.  SpringBoard is simply never spawned.
++		 *
++		 * Two explanations remain and only one leaves a trace:
++		 *
++		 *   1. launchd never attempts the spawn -- no trace at all.
++		 *   2. launchd attempts it and posix_spawn returns an error.  A
++		 *      spawn that fails BEFORE the fork leaves no child and
++		 *      therefore no exit record, and the success emitter is inside
++		 *      `if (error == 0 && !spawn_no_exec)`, so it is silent too.
++		 *
++		 * exit.seen cannot separate them: a child that dies pre-exec
++		 * reports the PARENT's comm, and there is exactly one such record
++		 * in the whole boot (exit.seen n=5 comm='launchd' code=1).  A
++		 * posix_spawn that returns an error creates no child at all, so it
++		 * leaves no exit either.  THIS is the only remaining place a
++		 * SpringBoard spawn attempt can hide.
++		 *
++		 * `parent`, NOT `comm`.  At this point p is the proc posix_spawn
++		 * created and its p_comm was copied from the caller at fork time --
++		 * it is launchd's name, NOT the name of the binary that failed.
++		 * Naming it `comm` would invite the misreading that
++		 * `exit.seen n=5 comm='launchd' code=1` already caused once this
++		 * session.  The errno is the decisive datum; the parent's name only
++		 * says which caller's spawn failed.
++		 *
++		 * NO PATH.  vn_getpath is not reachable from this tree's vfs layer
++		 * and imgp->ip_strings holds argv rather than the image path.  The
++		 * errno alone separates the two live hypotheses: ENOENT says the
++		 * binary is not where the plist says it is, EACCES or a signature
++		 * error says something else, and no record at all says launchd never
++		 * tried.
++		 *
++		 * PLACED before the `if (imgp != NULL)` cleanup that calls
++		 * vnode_put(imgp->ip_vp), so it covers every one of the ~26
++		 * `goto bad` paths rather than only the ones after
++		 * exec_activate_image().
++		 *
++		 * BOUNDED for the same reason every emitter here is: send() waits
++		 * synchronously on a 2000 ms deadline.  A boot where every spawn
++		 * fails is the worst case and it is still bounded.
++		 */
++		if (error != 0 && !spawn_no_exec) {
++			enum { kMaxSpawnFailRecords = 64 };
++			static char const fail_prefix[] =
++			    "{\"event\":\"spawn.failed\",\"n\":";
++			static char const fail_errno_middle[] =
++			    ",\"errno\":";
++			static char const fail_parent_middle[] = ",\"parent\":\"";
++			static char const fail_suffix[] =
++			    "\",\"source\":\"XNU.posix_spawn\"}\n";
++			static unsigned native_spawn_fail_records = 0;
++			char record[128];
++			unsigned used = 0, i = 0, safe = 1;
++			char c;
++			while (i < MAXCOMLEN && (c = p->p_comm[i]) != 0) {
++				if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
++				    || (c >= '0' && c <= '9') || c == '.' || c == '_'
++				    || c == '-')) {
++					safe = 0;
++				}
++				++i;
++			}
++			if (native_spawn_fail_records < kMaxSpawnFailRecords && safe
++			    && i != 0) {
++				extern int native_console_report(const void *, size_t);
++				unsigned n, digits = 0;
++				char text[4];
++				++native_spawn_fail_records;
++				n = native_spawn_fail_records;
++				while (used < sizeof(fail_prefix) - 1) {
++					record[used] = fail_prefix[used];
++					++used;
++				}
++				if (!n) {
++					text[digits++] = '0';
++				}
++				while (n && digits < sizeof(text)) {
++					text[digits++] = (char)('0' + n % 10);
++					n /= 10;
++				}
++				while (digits && used < sizeof(record) - 1) {
++					record[used++] = text[--digits];
++				}
++				for (unsigned k = 0; k < sizeof(fail_errno_middle) - 1
++				    && used < sizeof(record) - 1; ++k) {
++					record[used++] = fail_errno_middle[k];
++				}
++				{
++					unsigned e = (unsigned)error, ed = 0;
++					char et[4];
++					if (!e) {
++						et[ed++] = '0';
++					}
++					while (e && ed < sizeof(et)) {
++						et[ed++] = (char)('0' + e % 10);
++						e /= 10;
++					}
++					while (ed && used < sizeof(record) - 1) {
++						record[used++] = et[--ed];
++					}
++				}
++				for (unsigned k = 0; k < sizeof(fail_parent_middle) - 1
++				    && used < sizeof(record) - 1; ++k) {
++					record[used++] = fail_parent_middle[k];
++				}
++				for (unsigned k = 0; k < i && used < sizeof(record) - 1; ++k) {
++					record[used++] = p->p_comm[k];
++				}
++				for (unsigned k = 0; k < sizeof(fail_suffix) - 1
++				    && used < sizeof(record) - 1; ++k) {
++					record[used++] = fail_suffix[k];
++				}
++				record[used] = 0;
++				native_console_report(record, used);
++			}
++		}
++#endif
+ 		uthread_set_exec_data(current_uthread(), NULL);
+ 		if (imgp->ip_vp) {
+ 			vnode_put(imgp->ip_vp);
