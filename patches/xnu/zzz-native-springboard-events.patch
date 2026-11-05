@@ -703,3 +703,189 @@ diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
  		uthread_set_exec_data(current_uthread(), NULL);
  		if (imgp->ip_vp) {
  			vnode_put(imgp->ip_vp);
+
+diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
+--- a/bsd/kern/kern_exec.c
++++ b/bsd/kern/kern_exec.c
+@@ -4250,6 +4250,181 @@
+ 	error = exec_activate_image(imgp);
++#if defined(XNU_OWNER_CACHE_MOUNT) && XNU_OWNER_CACHE_MOUNT
++	/*
++	 * THE INVISIBLE HALF OF posix_spawn, AND THE HOLE IN ADDENDUM AZ.
++	 *
++	 * Addendum AZ read 0 `spawn.failed` records against 512 `spawn.seen`
++	 * records as "launchd never attempts the SpringBoard spawn".  Both of
++	 * those emitters live inside `if (error == 0 && !spawn_no_exec)` -- and
++	 * `spawn_no_exec` is TRUE on a whole second path through this function:
++	 *
++	 *   kern_exec.c:3869  if (imgp->ip_px_sa == NULL ||
++	 *   kern_exec.c:3876      !(px_sa.psa_flags & POSIX_SPAWN_SETEXEC)) {
++	 *   kern_exec.c:3879      if (imgp->ip_px_sa == NULL || !px_args.coal_info) {
++	 *   kern_exec.c:3880          goto do_fork1;
++	 *
++	 * `do_fork1` calls fork1(PROC_CREATE_SPAWN) and then FALLS THROUGH to
++	 * `imgp->ip_flags |= IMGPF_SPAWN; spawn_no_exec = TRUE;` at :4002.  A
++	 * spawn that arrives here by that route emits NEITHER of the two records
++	 * addendum AZ relied on, so "no spawn.failed" proved only "no failed
++	 * spawn on the exec path".
++	 *
++	 * The child still execs -- both branches converge on the
++	 * exec_activate_image() call on the line above -- so a child that DIES
++	 * leaves an exit.seen, and there is none for SpringBoard in any capture.
++	 * What is left unproven is a child that is ALIVE and blocked, which
++	 * leaves nothing at all.  THIS emitter closes exactly that hole.
++	 *
++	 * PLACED HERE, not at the `if (spawn_no_exec)` block at :4028, for two
++	 * reasons that were each checked rather than assumed:
++	 *
++	 *   1. `imgp->ip_vp` is assigned at :2255 inside exec_activate_image(),
++	 *      which is the call on the line above.  At :4028 it is still NULL,
++	 *      so an emitter there could not name the binary.  `v_name` is the
++	 *      same field kern_exec.c:1294 uses to name an executable in an
++	 *      error log, so it is a known-good source.
++	 *   2. `p->p_comm` has already been written by set_proc_name() inside
++	 *      exec_mach_imgact(), which exec_activate_image() calls -- the same
++	 *      property the `spawn.seen` emitter 30 lines below depends on, and
++	 *      which is proven by its 512 correctly-named records.
++	 *
++	 * `comm` is therefore the CHILD's new name, not the parent's, and
++	 * `vname` is the image's own name.  Recording both means a reader never
++	 * has to work out which of the two a field holds -- the mistake the
++	 * `exit.seen comm=launchd` record already caused once.
++	 *
++	 * ZERO RECORDS IS A REAL ANSWER, and it is a different answer from
++	 * "not measured": it says every spawn this kernel saw took the SETEXEC
++	 * exec path, so nothing hid here.  Task #32 is the work that keeps those
++	 * two apart.  The guard is the SAME XNU_OWNER_CACHE_MOUNT the 512
++	 * `spawn.seen` records already prove is live in this kernel, in the same
++	 * file, so an absent literal here means the emitter is compiled in and
++	 * measured nothing -- not that it is missing.
++	 *
++	 * BOUNDED like every emitter here: the channel's send() waits
++	 * synchronously on a 2000 ms deadline (NativeVirtioConsole.cpp:226 sets
++	 * it, :250 is the wait), so an unbounded emitter would stall the boot.
++	 */
++		if (!spawn_no_exec) {
++			/* nothing: this block is only for the fork1 half */
++		} else {
++			extern int native_console_report(const void *, size_t);
++			enum { kMaxFork1SpawnRecords = 65536 };
++			static char const f1_prefix[] =
++			    "{\"event\":\"fork1.spawn\",\"n\":";
++			static char const f1_vname_middle[] = ",\"vname\":\"";
++			static char const f1_comm_middle[] = "\",\"comm\":\"";
++			static char const f1_suffix[] =
++			    "\",\"source\":\"XNU.posix_spawn.do_fork1\"}\n";
++			static char const f1_sb_prefix[] =
++			    "{\"event\":\"springboard.fork1\",\"vname\":\"";
++			static char const f1_sb_suffix[] =
++			    "\",\"source\":\"XNU.posix_spawn.do_fork1\"}\n";
++			static char const f1_sb_name[] = "SpringBoard";
++			static unsigned native_fork1_spawn_records = 0;
++			static int native_fork1_sb_reported = 0;
++			char record[224];
++			unsigned used = 0, i = 0, digits = 0, k = 0;
++			char text[8];
++			char c;
++			int safe = 1, is_sb = 0;
++			char const *vname = (imgp->ip_vp != NULL)
++			    ? imgp->ip_vp->v_name : NULL;
++
++			/* comm safety, same charset rule as every emitter here */
++			while (i < MAXCOMLEN && (c = p->p_comm[i]) != 0) {
++				if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
++				    || (c >= '0' && c <= '9') || c == '.' || c == '_'
++				    || c == '-')) {
++					safe = 0;
++				}
++				++i;
++			}
++
++			/* is this SpringBoard?  exact match on the image's own name */
++			if (vname != NULL) {
++				k = 0;
++				while (f1_sb_name[k] != 0 && vname[k] == f1_sb_name[k]) {
++					++k;
++				}
++				is_sb = (f1_sb_name[k] == 0 && vname[k] == 0);
++			}
++
++			/*
++			 * The one-shot first, because it is the answer to the
++			 * question this whole chain is asking and it must not be
++			 * lost to the bound below.
++			 */
++			if (is_sb && !native_fork1_sb_reported) {
++				native_fork1_sb_reported = 1;
++				used = 0;
++				while (used < sizeof(f1_sb_prefix) - 1
++				    && used < sizeof(record) - 1) {
++					record[used] = f1_sb_prefix[used];
++					++used;
++				}
++				for (k = 0; vname[k] != 0 && used < sizeof(record) - 1; ++k) {
++					record[used++] = vname[k];
++				}
++				for (k = 0; k < sizeof(f1_sb_suffix) - 1
++				    && used < sizeof(record) - 1; ++k) {
++					record[used++] = f1_sb_suffix[k];
++				}
++				record[used] = 0;
++				native_console_report(record, used);
++			}
++
++			if (native_fork1_spawn_records < kMaxFork1SpawnRecords
++			    && safe && i != 0 && vname != NULL) {
++				unsigned n = native_fork1_spawn_records;
++				++native_fork1_spawn_records;
++				used = 0;
++				while (used < sizeof(f1_prefix) - 1
++				    && used < sizeof(record) - 1) {
++					record[used] = f1_prefix[used];
++					++used;
++				}
++				if (!n) {
++					text[digits++] = '0';
++				}
++				while (n && digits < sizeof(text)) {
++					text[digits++] = (char)('0' + n % 10);
++					n /= 10;
++				}
++				while (digits && used < sizeof(record) - 1) {
++					record[used++] = text[--digits];
++				}
++				for (k = 0; k < sizeof(f1_vname_middle) - 1
++				    && used < sizeof(record) - 1; ++k) {
++					record[used++] = f1_vname_middle[k];
++				}
++				for (k = 0; vname[k] != 0 && used < sizeof(record) - 1; ++k) {
++					char vc = vname[k];
++					if ((vc >= 'a' && vc <= 'z') || (vc >= 'A' && vc <= 'Z')
++					    || (vc >= '0' && vc <= '9') || vc == '.'
++					    || vc == '_' || vc == '-' || vc == '/') {
++						record[used++] = vc;
++					} else {
++						record[used++] = '?';
++					}
++				}
++				for (k = 0; k < sizeof(f1_comm_middle) - 1
++				    && used < sizeof(record) - 1; ++k) {
++					record[used++] = f1_comm_middle[k];
++				}
++				for (k = 0; k < i && used < sizeof(record) - 1; ++k) {
++					record[used++] = p->p_comm[k];
++				}
++				for (k = 0; k < sizeof(f1_suffix) - 1
++				    && used < sizeof(record) - 1; ++k) {
++					record[used++] = f1_suffix[k];
++				}
++				record[used] = 0;
++				native_console_report(record, used);
++			}
++		}
++#endif
+ #if defined(HAS_APPLE_PAC)
+ 	const uint8_t disable_user_jop = imgp->ip_flags & IMGPF_NOJOP ? TRUE : FALSE;
+ 	ml_task_set_jop_pid_from_shared_region(new_task, disable_user_jop);
+ 	ml_task_set_disable_user_jop(new_task, disable_user_jop);
+ 	ml_thread_set_disable_user_jop(imgp->ip_new_thread, disable_user_jop);
