@@ -2,7 +2,7 @@ diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
 index db74f99..53694ac 100644
 --- a/bsd/kern/kern_exec.c
 +++ b/bsd/kern/kern_exec.c
-@@ -188,6 +188,137 @@
+@@ -188,6 +188,143 @@
  
  #include <mach/exclaves.h>
  
@@ -87,6 +87,12 @@ index db74f99..53694ac 100644
 +	int at = 0;
 +	int index;
 +
++	/* PID 1 is the original launchd record emitted by load_init_program().
++	 * M8's second event must describe a later daemon, so leave launchd out of
++	 * this one-shot emitter and wait for the first successful exec with pid > 1. */
++	if (p->p_pid <= 1) {
++		return;
++	}
 +	if (native_m8_daemon_reported) {
 +		return;                     /* one daemon.spawned, one record */
 +	}
@@ -140,7 +146,7 @@ index db74f99..53694ac 100644
  extern boolean_t vm_darkwake_mode;
  
  /* enable crash reports on various exec failures */
-@@ -5285,16 +5416,19 @@ __mac_execve(proc_t p, struct __mac_execve_args *uap, int32_t *retval __unused)
+@@ -5285,16 +5422,19 @@ __mac_execve(proc_t p, struct __mac_execve_args *uap, int32_t *retval __unused)
  
  	if (!error) {
  		exec_done = TRUE;
@@ -160,7 +166,7 @@ index db74f99..53694ac 100644
  		error = process_signature(p, imgp);
  	}
 
-@@ -8330,6 +8464,47 @@ load_init_program(proc_t p)
+@@ -8330,6 +8470,47 @@ load_init_program(proc_t p)
  		printf("load_init_program: attempting to load %s\n", init_programs[i]);
  		error = load_init_program_at_path(p, (user_addr_t)scratch_addr, init_programs[i], init_envp);
  		if (!error) {
