@@ -1,9 +1,12 @@
 diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
 --- a/bsd/kern/kern_exec.c
 +++ b/bsd/kern/kern_exec.c
-@@ -5283,6 +5283,220 @@
+@@ -5283,9 +5283,223 @@
  	if (!error) {
  		exec_done = TRUE;
+ #if defined(XNU_OWNER_CACHE_MOUNT) && XNU_OWNER_CACHE_MOUNT
+ 		native_m8_report_daemon(p);
+ #endif
  		assert(imgp->ip_new_thread != NULL);
 +#if defined(XNU_OWNER_CACHE_MOUNT) && XNU_OWNER_CACHE_MOUNT
 +		/* SpringBoard is now a running process in the guest, and this is the
@@ -563,10 +566,7 @@ diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
 diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
 --- a/bsd/kern/kern_exec.c
 +++ b/bsd/kern/kern_exec.c
-@@ -4703,6 +4703,139 @@
- 	}
- 
- 	if (imgp != NULL) {
+@@ -4706,3 +4706,136 @@
 +#if defined(XNU_OWNER_CACHE_MOUNT) && XNU_OWNER_CACHE_MOUNT
 +		/* THE FAILURE PATH.  Interval 41 closed every doubt about
 +		 * springboard.running's absence and turned it into a guest fact:
@@ -703,7 +703,6 @@ diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
  		uthread_set_exec_data(current_uthread(), NULL);
  		if (imgp->ip_vp) {
  			vnode_put(imgp->ip_vp);
-
 diff --git a/bsd/kern/kern_exec.c b/bsd/kern/kern_exec.c
 --- a/bsd/kern/kern_exec.c
 +++ b/bsd/kern/kern_exec.c

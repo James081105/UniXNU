@@ -35,17 +35,28 @@ fi
 # Remove them first so earlier independent patches retain their idempotent checks.
 # The same holds for the boot-time GPU addon mount and the staged system apps copy (zzy), which edit the owner Data mount function
 # inside the systemos patch. Reverse newest first; the loop below re-applies them in name order.
+PATCH_STAMP_DIR=.cache/xnu-work/.git/unipad-patch-stamps
+mkdir -p "$PATCH_STAMP_DIR"
 for LATE_PATCH in "$ROOT/patches/xnu/zzz-boot-progress.patch" "$ROOT/patches/xnu/zzy-staged-system-apps.patch" \
     "$ROOT/patches/xnu/zzy-native-gpu-addon-mount.patch"; do
   if git -C .cache/xnu-work apply --reverse --check "$LATE_PATCH" >/dev/null 2>&1; then
     git -C .cache/xnu-work apply --reverse "$LATE_PATCH"
+    rm -f "$PATCH_STAMP_DIR/$(shasum -a 256 "$LATE_PATCH" | awk '{print $1}')"
   fi
 done
 for PATCH in "$ROOT"/patches/xnu/*.patch "$ROOT"/kits/NativePrelink/patches/*.patch; do
+  PATCH_STAMP="$PATCH_STAMP_DIR/$(shasum -a 256 "$PATCH" | awk '{print $1}')"
+  # A later patch may have changed the context around an earlier one.  The
+  # tree-local stamp is stronger evidence than reverse-checking that mutable
+  # context, and it survives the bootstrap pass on the same work tree.
+  if [ -f "$PATCH_STAMP" ]; then
+    continue
+  fi
   if ! git -C .cache/xnu-work apply --reverse --check "$PATCH" >/dev/null 2>&1; then
     git -C .cache/xnu-work apply --check "$PATCH"
     git -C .cache/xnu-work apply "$PATCH"
   fi
+  : > "$PATCH_STAMP"
 done
 export XNU_AVAILABILITY_PL=$ROOT/.cache/fakeroot/usr/local/libexec/availability.pl
 python3 scripts/prepare-xnu-source.py
